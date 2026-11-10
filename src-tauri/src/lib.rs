@@ -1,3 +1,5 @@
+mod llm;
+
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -275,6 +277,7 @@ pub fn run() {
     append_native_log("info", "rust.application", "Starting C-3PO");
 
     tauri::Builder::default()
+        .manage(llm::LlmRuntime::default())
         .on_permission_request(|_, kind| {
             // Это разрешает запрос внутри WebView, но не обходит защиту ОС:
             // macOS/Windows всё равно показывают пользователю своё системное окно.
@@ -294,6 +297,11 @@ pub fn run() {
             get_system_info,
             get_environment_report,
             get_process_metrics,
+            llm::get_llm_status,
+            llm::get_llm_runtime_status,
+            llm::start_llm,
+            llm::stop_llm,
+            llm::generate_local_reply,
             log_client_event,
             get_recent_logs,
             get_log_path

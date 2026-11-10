@@ -178,6 +178,10 @@ button:disabled {
   background: var(--success);
 }
 
+.ghost-button i.prompt {
+  background: var(--gold);
+}
+
 .ghost-button i.denied,
 .ghost-button i.unsupported {
   background: var(--danger);
@@ -969,6 +973,200 @@ button:disabled {
   line-height: 1.5;
 }
 
+.model-modal {
+  width: min(640px, 100%);
+}
+
+.model-state {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 22px 24px 16px;
+  padding: 16px;
+  border: 1px solid #dfc68e;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(246, 236, 214, 0.82), rgba(255, 255, 255, 0.3));
+}
+
+.model-state.ready {
+  border-color: #b8d7bd;
+  background: rgba(69, 141, 89, 0.08);
+}
+
+.model-state-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  color: var(--gold-dark);
+  background: var(--gold-soft);
+  font-size: 21px;
+}
+
+.model-state strong {
+  font-size: 14px;
+}
+
+.model-state p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.model-checklist {
+  margin: 0 24px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.model-checklist article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 68px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.model-checklist article:last-child {
+  border-bottom: 0;
+}
+
+.model-checklist article > span {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  color: var(--gold-dark);
+  background: var(--gold-soft);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.model-checklist strong,
+.model-checklist small {
+  display: block;
+}
+
+.model-checklist strong {
+  font-size: 12px;
+}
+
+.model-checklist small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-checklist b {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: #706d65;
+  background: #ecebe6;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.model-checklist b.ready {
+  color: #3f7549;
+  background: #e7f3e7;
+}
+
+.model-checklist b.missing {
+  color: #856221;
+  background: #f7edda;
+}
+
+.model-path {
+  margin: 16px 24px 0;
+  padding: 13px 14px;
+  border-radius: 12px;
+  background: rgba(128, 124, 109, 0.08);
+}
+
+.model-path span,
+.model-path code,
+.model-path small {
+  display: block;
+}
+
+.model-path span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.model-path code {
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.model-path small {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.model-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 24px 22px;
+}
+
+.model-actions button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--surface-raised);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.model-actions .model-primary-action {
+  border-color: #80601f;
+  color: #fff;
+  background: #8b6720;
+}
+
+.model-test-reply {
+  margin: -6px 24px 22px;
+  padding: 14px;
+  border: 1px solid #b8d7bd;
+  border-radius: 12px;
+  background: rgba(69, 141, 89, 0.08);
+}
+
+.model-test-reply span {
+  color: #4a7350;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.model-test-reply p {
+  margin: 7px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .onboarding-backdrop {
   background: rgba(16, 17, 14, 0.72);
 }
@@ -1198,6 +1396,36 @@ button:disabled {
 
   .log-actions button:last-child {
     flex: 1;
+  }
+
+  .model-state,
+  .model-checklist,
+  .model-path {
+    margin-right: 16px;
+    margin-left: 16px;
+  }
+
+  .model-checklist article {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .model-checklist article > b {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .model-actions {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .model-actions button {
+    flex: 1 1 120px;
+  }
+
+  .model-test-reply {
+    margin-right: 16px;
+    margin-left: 16px;
   }
 }
 

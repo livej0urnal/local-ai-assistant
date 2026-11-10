@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import droidPortrait from "./assets/protocol-droid.png";
-import { assistantPhrase, voiceDemoPhrases } from "./assistantPhrases";
+import { assistantPhrase, moviePhrase, voiceDemoPhrases } from "./assistantPhrases";
 
 type Message = {
   id: number;
@@ -23,6 +23,35 @@ type ProcessMetrics = {
   residentMemoryBytes: number;
   virtualMemoryBytes: number;
   capturedAtUnixMs: number;
+};
+
+type LocalModelFile = {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  validGguf: boolean;
+};
+
+type LlmStatus = {
+  state: "engine-missing" | "model-missing" | "model-invalid" | "ready";
+  engineFound: boolean;
+  enginePath: string | null;
+  modelDirectory: string;
+  selectedModel: LocalModelFile | null;
+  discoveredModels: number;
+  message: string;
+};
+
+type LlmRuntimeStatus = {
+  state: "stopped" | "loading" | "ready";
+  ready: boolean;
+  processId: number | null;
+  address: string;
+  message: string;
+};
+
+type LocalReply = {
+  text: string;
 };
 
 type NativeCapability = {
@@ -78,7 +107,7 @@ const messages = ref<Message[]>([
   {
     id: 1,
     role: "assistant",
-    text: `${assistantPhrase("greeting")} Скажите: «Покажи информацию о системе».`,
+    text: `${moviePhrase("identity")} Скажите: «Покажи информацию о системе».`,
   },
 ]);
 const nextMessageId = ref(2);
@@ -89,6 +118,7 @@ const pendingAction = ref(false);
 const isWorking = ref(false);
 const chatOpen = ref(false);
 const permissionsOpen = ref(false);
+const llmOpen = ref(false);
 const onboardingOpen = ref(false);
 const voiceState = ref<VoiceState>("idle");
 const microphonePermission = ref<PermissionState>("checking");
@@ -109,6 +139,10 @@ const memoryBaselineBytes = ref(0);
 const memoryPeakBytes = ref(0);
 const selectedVoiceName = ref("Системный русский голос");
 const recognitionBlockedReason = ref("");
+const llmStatus = ref<LlmStatus | null>(null);
+const llmLoading = ref(false);
+const llmRuntime = ref<LlmRuntimeStatus | null>(null);
+const llmTestReply = ref("");
 
 let recognition: RecognitionLike | null = null;
 let microphoneStream: MediaStream | null = null;
@@ -163,11 +197,122 @@ const logSummary = computed(() => {
   if (!errors && !warnings) return `${recentLogs.value.length} событий · ошибок нет`;
   return `${recentLogs.value.length} событий · ошибок ${errors} · предупреждений ${warnings}`;
 });
+const llmShortLabel = computed(() => {
+  if (!llmStatus.value) return "Проверяю модель";
+  const labels: Record<LlmStatus["state"], string> = {
+    "engine-missing": "Нужен llama.cpp",
+    "model-missing": "Нужна GGUF-модель",
+    "model-invalid": "Ошибка модели",
+    ready: "R2-D2 готов",
+  };
+  return labels[llmStatus.value.state];
+});
 
 function formatBytes(bytes: number) {
   const absolute = Math.abs(bytes);
   if (absolute < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} КБ`;
+  if (absolute >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
   return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+}
+
+async function loadLlmStatus() {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    llmStatus.value = {
+      state: "model-missing",
+      engineFound: true,
+      enginePath: "Браузерный предпросмотр",
+      modelDirectory: "Доступно только в приложении Tauri",
+      selectedModel: null,
+      discoveredModels: 0,
+      message: "В браузерном режиме показано демонстрационное состояние локальной модели.",
+    };
+    return;
+  }
+
+  llmLoading.value = true;
+  try {
+    llmStatus.value = await invoke<LlmStatus>("get_llm_status");
+    llmRuntime.value = await invoke<LlmRuntimeStatus>("get_llm_runtime_status");
+  } catch (error) {
+    const details = errorDetails(error);
+    await writeLog("error", "llm.status", `${details.name}: ${details.message}`);
+  } finally {
+    llmLoading.value = false;
+  }
+}
+
+async function waitForLocalModel() {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const status = await invoke<LlmRuntimeStatus>("get_llm_runtime_status");
+    llmRuntime.value = status;
+    if (status.ready) return true;
+    if (status.state === "stopped" && attempt > 0) return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+async function startLocalModel() {
+  if (!("__TAURI_INTERNALS__" in window) || llmStatus.value?.state !== "ready") return false;
+  llmLoading.value = true;
+  llmTestReply.value = "";
+  try {
+    llmRuntime.value = await invoke<LlmRuntimeStatus>("start_llm");
+    const ready = await waitForLocalModel();
+    if (!ready) throw new Error("llama-server не успел загрузить модель");
+    await refreshProcessMetrics();
+    return true;
+  } catch (error) {
+    const details = errorDetails(error);
+    llmTestReply.value = `${details.name}: ${details.message}`;
+    await writeLog("error", "llm.start", llmTestReply.value);
+    return false;
+  } finally {
+    llmLoading.value = false;
+  }
+}
+
+async function stopLocalModel() {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  llmRuntime.value = await invoke<LlmRuntimeStatus>("stop_llm");
+  llmTestReply.value = moviePhrase("shutdown");
+  await refreshProcessMetrics();
+}
+
+async function askLocalModel(prompt: string, showInConversation = true) {
+  isWorking.value = true;
+  voiceState.value = "thinking";
+  try {
+    if (!llmRuntime.value?.ready && !(await startLocalModel())) {
+      throw new Error("Локальная модель не запустилась");
+    }
+    const reply = await invoke<LocalReply>("generate_local_reply", { prompt });
+    llmTestReply.value = reply.text;
+    lastCommand.value = reply.text;
+    if (showInConversation) addMessage("assistant", reply.text);
+    speak(reply.text);
+    return reply.text;
+  } catch (error) {
+    const details = errorDetails(error);
+    const message = `Локальная модель не ответила: ${details.message}`;
+    llmTestReply.value = message;
+    if (showInConversation) addMessage("assistant", message);
+    voiceState.value = "error";
+    await writeLog("error", "llm.generate", `${details.name}: ${details.message}`);
+    return "";
+  } finally {
+    isWorking.value = false;
+  }
+}
+
+async function testLocalModel() {
+  llmTestReply.value = "Запускаю модель и готовлю ответ…";
+  await askLocalModel("Коротко представься как R2-D2 и скажи, что работаешь полностью локально.", false);
+}
+
+async function openLlmPanel() {
+  llmOpen.value = true;
+  await loadLlmStatus();
 }
 
 async function refreshProcessMetrics() {
@@ -564,7 +709,7 @@ function testVoice() {
 function proposeSystemInfo() {
   pendingAction.value = true;
   voiceState.value = "idle";
-  const response = `${assistantPhrase("systemPermission")} Скажите «выполнить» или нажмите кнопку подтверждения.`;
+  const response = `${moviePhrase("riskyAction")} Скажите «выполнить» или нажмите кнопку подтверждения.`;
   addMessage("assistant", response);
   speak(response);
 }
@@ -598,7 +743,7 @@ async function approveAction() {
     lastCommand.value = response;
     speak(response);
   } catch (error) {
-    const response = `${assistantPhrase("systemFailure")} ${String(error)}`;
+    const response = `${moviePhrase("criticalError")} ${String(error)}`;
     addMessage("assistant", response);
     speak(response);
   } finally {
@@ -637,7 +782,12 @@ function processVoiceCommand(text: string) {
     return;
   }
 
-  const response = `${assistantPhrase("unknownCommand")} Сейчас доступна информация о системе.`;
+  if (llmStatus.value?.state === "ready") {
+    void askLocalModel(text);
+    return;
+  }
+
+  const response = `${moviePhrase("unknownBehavior")} Сейчас доступна информация о системе.`;
   addMessage("assistant", response);
   speak(response);
 }
@@ -670,6 +820,7 @@ function permissionStatusLabel(id: string) {
 
 onMounted(async () => {
   await loadEnvironment();
+  await loadLlmStatus();
   configureRecognition();
   await refreshProcessMetrics();
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
@@ -708,6 +859,11 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="header-actions">
+        <button class="ghost-button model-button" type="button" @click="openLlmPanel">
+          <span class="button-icon">◈</span>
+          <span>{{ llmShortLabel }}</span>
+          <i :class="llmStatus?.state === 'ready' ? 'granted' : 'prompt'"></i>
+        </button>
         <button class="ghost-button" type="button" @click="openPermissions">
           <span class="button-icon">⌾</span>
           Доступы
@@ -917,6 +1073,100 @@ onBeforeUnmount(() => {
           C-3PO не запрашивает права заранее, если функция ими не пользуется. Это уменьшает доступ
           приложения к системе.
         </p>
+      </section>
+    </div>
+
+    <div v-if="llmOpen" class="modal-backdrop" @click.self="llmOpen = false">
+      <section class="permission-modal model-modal" aria-label="Локальная модель">
+        <header>
+          <div>
+            <span class="eyebrow">ЛОКАЛЬНЫЙ ИНТЕЛЛЕКТ</span>
+            <h2>R2-D2 — локальная модель</h2>
+          </div>
+          <button type="button" aria-label="Закрыть" @click="llmOpen = false">×</button>
+        </header>
+
+        <div class="model-state" :class="llmStatus?.state || 'checking'">
+          <span class="model-state-icon">◈</span>
+          <div>
+            <strong>{{ llmShortLabel }}</strong>
+            <p>{{ llmStatus?.message || "Проверяю локальное окружение…" }}</p>
+          </div>
+        </div>
+
+        <div class="model-checklist">
+          <article>
+            <span>1</span>
+            <div>
+              <strong>Движок llama.cpp</strong>
+              <small>{{ llmStatus?.enginePath || "Не найден" }}</small>
+            </div>
+            <b :class="llmStatus?.engineFound ? 'ready' : 'missing'">
+              {{ llmStatus?.engineFound ? "найден" : "нужен" }}
+            </b>
+          </article>
+          <article>
+            <span>2</span>
+            <div>
+              <strong>Модель GGUF</strong>
+              <small v-if="llmStatus?.selectedModel">
+                {{ llmStatus.selectedModel.name }} · {{ formatBytes(llmStatus.selectedModel.sizeBytes) }}
+              </small>
+              <small v-else>Пока не установлена</small>
+            </div>
+            <b :class="llmStatus?.selectedModel ? 'ready' : 'missing'">
+              {{ llmStatus?.selectedModel ? "готова" : "нужна" }}
+            </b>
+          </article>
+          <article>
+            <span>3</span>
+            <div>
+              <strong>Локальная генерация</strong>
+              <small>Запуск сервера и потоковые ответы</small>
+            </div>
+            <b>следующий шаг</b>
+          </article>
+          <article>
+            <span>4</span>
+            <div>
+              <strong>Состояние процесса</strong>
+              <small>{{ llmRuntime?.message || "Модель ещё не запускалась" }}</small>
+            </div>
+            <b :class="llmRuntime?.ready ? 'ready' : ''">{{ llmRuntime?.state || "остановлена" }}</b>
+          </article>
+        </div>
+
+        <div class="model-path">
+          <span>Папка для моделей</span>
+          <code>{{ llmStatus?.modelDirectory || "—" }}</code>
+          <small>Файл модели должен иметь расширение .gguf и корректный заголовок GGUF.</small>
+        </div>
+
+        <div class="model-actions">
+          <button type="button" :disabled="llmLoading" @click="loadLlmStatus">Обновить</button>
+          <button v-if="llmRuntime?.ready" type="button" :disabled="llmLoading" @click="stopLocalModel">
+            Остановить
+          </button>
+          <button
+            v-else
+            class="model-primary-action"
+            type="button"
+            :disabled="llmLoading || llmStatus?.state !== 'ready'"
+            @click="startLocalModel"
+          >
+            {{ llmLoading ? "Загружаю…" : "Запустить модель" }}
+          </button>
+          <button
+            class="model-primary-action"
+            type="button"
+            :disabled="llmLoading || llmStatus?.state !== 'ready'"
+            @click="testLocalModel"
+          >Тестовый вопрос</button>
+        </div>
+        <div v-if="llmTestReply" class="model-test-reply">
+          <span>Ответ R2-D2</span>
+          <p>{{ llmTestReply }}</p>
+        </div>
       </section>
     </div>
 

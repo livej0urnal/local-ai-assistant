@@ -8,6 +8,13 @@ pub(crate) struct ActionResult {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WeatherReport {
+    source: String,
+    summary: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplicationId {
     Telegram,
@@ -18,6 +25,7 @@ enum ApplicationId {
     Calendar,
     Calculator,
     Settings,
+    Weather,
 }
 
 fn normalize(value: &str) -> String {
@@ -42,6 +50,7 @@ fn application_id(value: &str) -> Option<ApplicationId> {
         "calendar" | "календарь" => Some(ApplicationId::Calendar),
         "calculator" | "калькулятор" => Some(ApplicationId::Calculator),
         "settings" | "настройки" | "параметры" => Some(ApplicationId::Settings),
+        "weather" | "погода" => Some(ApplicationId::Weather),
         _ => None,
     }
 }
@@ -57,6 +66,7 @@ fn launch(application: ApplicationId) -> Result<(), String> {
         ApplicationId::Calendar => "Calendar",
         ApplicationId::Calculator => "Calculator",
         ApplicationId::Settings => "System Settings",
+        ApplicationId::Weather => "Weather",
     };
     let output = Command::new("/usr/bin/open")
         .args(["-a", name])
@@ -80,6 +90,7 @@ fn launch(application: ApplicationId) -> Result<(), String> {
         ApplicationId::Calendar => ("explorer.exe", "outlookcal:"),
         ApplicationId::Calculator => ("calc.exe", ""),
         ApplicationId::Settings => ("explorer.exe", "ms-settings:"),
+        ApplicationId::Weather => ("explorer.exe", "msnweather:"),
     };
     let mut command = Command::new(program);
     if !argument.is_empty() {
@@ -99,13 +110,79 @@ fn launch(_application: ApplicationId) -> Result<(), String> {
 #[tauri::command]
 pub(crate) fn open_application(application: String) -> Result<ActionResult, String> {
     let application_id = application_id(&application).ok_or_else(|| {
-        "Приложение отсутствует в безопасном каталоге C-3PO. Доступны Telegram, браузер, почта, файлы, заметки, календарь, калькулятор и настройки.".to_string()
+        "Приложение отсутствует в безопасном каталоге C-3PO. Доступны Telegram, браузер, почта, файлы, заметки, календарь, калькулятор, погода и настройки.".to_string()
     })?;
     launch(application_id)?;
     Ok(ActionResult {
         success: true,
         message: format!("Приложение «{}» открыто.", application.trim()),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn read_current_weather() -> Result<WeatherReport, String> {
+    // Weather не предоставляет обычный локальный API. Читаем только одну
+    // доступную AXDescription текущего местоположения; кликов и изменений нет.
+    const SCRIPT: &str = r#"
+const weather = Application("Weather");
+weather.activate();
+delay(1.5);
+const process = Application("System Events").processes.byName("Weather");
+function attribute(element, name) {
+  try { return element.attributes.byName(name).value(); } catch (_) { return null; }
+}
+function findCurrent(element, depth) {
+  if (depth > 30) return null;
+  const description = attribute(element, "AXDescription");
+  if (description && String(description).includes("градус") &&
+      (String(description).includes("ТЕКУЩЕЕ МЕСТО") || String(description).includes("CURRENT LOCATION"))) {
+    return String(description);
+  }
+  let children = [];
+  try { children = element.uiElements(); } catch (_) { return null; }
+  for (const child of children) {
+    const result = findCurrent(child, depth + 1);
+    if (result) return result;
+  }
+  return null;
+}
+const summary = findCurrent(process.windows[0], 0);
+if (!summary) throw new Error("current weather was not found");
+console.log(summary);
+"#;
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", SCRIPT])
+        .output()
+        .map_err(|error| format!("Не удалось прочитать приложение «Погода»: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if error.contains("not allowed assistive access") || error.contains("-25211") {
+            return Err("macOS не разрешила чтение приложения «Погода». Разрешите C-3PO в Системные настройки → Конфиденциальность и безопасность → Универсальный доступ.".to_string());
+        }
+        return Err(format!(
+            "Приложение «Погода» не отдало текущие данные: {error}"
+        ));
+    }
+    let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if summary.is_empty() {
+        return Err("Приложение «Погода» вернуло пустую сводку".to_string());
+    }
+    Ok(WeatherReport {
+        source: "macOS Weather".to_string(),
+        summary,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_current_weather() -> Result<WeatherReport, String> {
+    Err("Чтение системной погоды пока подключено только на macOS. На Windows C-3PO может открыть приложение «Погода».".to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn get_current_weather() -> Result<WeatherReport, String> {
+    tauri::async_runtime::spawn_blocking(read_current_weather)
+        .await
+        .map_err(|error| format!("Не удалось дождаться данных погоды: {error}"))?
 }
 
 fn validate_message(contact: &str, message: &str) -> Result<(String, String), String> {
@@ -202,6 +279,7 @@ mod tests {
     #[test]
     fn resolves_only_known_application_aliases() {
         assert_eq!(application_id("Телеграмм"), Some(ApplicationId::Telegram));
+        assert_eq!(application_id("Погода"), Some(ApplicationId::Weather));
         assert_eq!(
             application_id("калькулятор"),
             Some(ApplicationId::Calculator)

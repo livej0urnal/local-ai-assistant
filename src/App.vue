@@ -147,6 +147,11 @@ type NativeActionResult = {
   message: string;
 };
 
+type WeatherReport = {
+  source: string;
+  summary: string;
+};
+
 type RecognitionResultItem = {
   isFinal: boolean;
   0: { transcript: string };
@@ -931,7 +936,7 @@ async function playR2D2Signal(mood: R2D2Mood) {
   }
 }
 
-async function askLocalModel(prompt: string, showInConversation = true) {
+async function askLocalModel(prompt: string, showInConversation = true, toolContext: string | null = null) {
   isWorking.value = true;
   isConsultingR2.value = true;
   voiceState.value = "thinking";
@@ -949,6 +954,7 @@ async function askLocalModel(prompt: string, showInConversation = true) {
       language: selectedCommandLanguage.value.modelName,
       userName: currentProfile.value?.name ?? null,
       preferredModel: modelPreference.value === "auto" ? null : modelPreference.value,
+      toolContext,
     });
     llmTestReply.value = reply.text;
     lastCommand.value = reply.text;
@@ -1782,6 +1788,47 @@ async function openKnownApplication(application: string) {
   }
 }
 
+async function answerWeatherQuestion(question: string, notifyInBackground: boolean) {
+  isWorking.value = true;
+  voiceState.value = "thinking";
+  lastCommand.value = "Сверяюсь с системным приложением «Погода»…";
+  try {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      throw new Error("Системная погода доступна только в приложении C-3PO");
+    }
+    const report = await invoke<WeatherReport>("get_current_weather");
+    await writeLog("info", "tool.weather", "Получена актуальная сводка из системного приложения", {
+      source: report.source,
+      characters: report.summary.length,
+    });
+    const toolContext = `Источник: ${report.source}. Актуальная сводка: ${report.summary}`;
+    const reply = await askLocalModel(question, true, toolContext);
+    if (reply) {
+      if (notifyInBackground) void notifyFromBackground(reply);
+      return;
+    }
+
+    // Даже если локальная LLM временно не загрузилась, показываем реальные
+    // данные инструмента, а не придумываем погоду.
+    const fallback = `${report.summary}. Источник: приложение «Погода».`;
+    addMessage("assistant", fallback);
+    lastCommand.value = fallback;
+    speak(fallback);
+    if (notifyInBackground) void notifyFromBackground(fallback);
+    isWorking.value = false;
+  } catch (error) {
+    const details = errorDetails(error);
+    const response = `Не удалось получить актуальную погоду: ${details.message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    voiceState.value = microphoneActive.value ? "listening" : "error";
+    await writeLog("error", "tool.weather", `${details.name}: ${details.message}`);
+    speak(response);
+    if (notifyInBackground) void notifyFromBackground(response);
+    isWorking.value = false;
+  }
+}
+
 function processVoiceCommand(text: string, notifyInBackground = false) {
   const normalized = text.toLowerCase();
   const localizedSystemCommand = commandText("systemCommand").toLowerCase();
@@ -1856,6 +1903,10 @@ function processVoiceCommand(text: string, notifyInBackground = false) {
   if (normalized.includes(localizedSystemCommand) || /(систем|компьютер|операцион|памят|процессор)/.test(normalized)) {
     proposeSystemInfo();
     if (notifyInBackground) void notifyFromBackground("Для показа системной информации нужно ваше подтверждение. Откройте C-3PO.");
+    return;
+  }
+  if (/(погод|weather|tiempo|wetter|m[ée]t[ée]o|tempo|天气|天気|طقس)/iu.test(normalized)) {
+    void answerWeatherQuestion(text, notifyInBackground);
     return;
   }
   if (normalized.includes(localizedChatCommand) || /(открой|покажи).*(чат|диалог)/.test(normalized)) {

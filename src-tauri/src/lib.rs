@@ -414,6 +414,7 @@ pub fn run() {
             get_process_metrics,
             show_main_window,
             executor::open_application,
+            executor::get_current_weather,
             executor::send_telegram_message,
             get_saved_microphone_approval,
             set_saved_microphone_approval,

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>C-3PO использует микрофон, чтобы распознавать ваши голосовые команды.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>C-3PO преобразует голосовые команды в текст для выполнения разрешённых действий.</string>
+</dict>
+</plist>

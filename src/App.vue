@@ -515,6 +515,11 @@ let privateVoiceIndex = 0;
 let privateVoiceAudio: HTMLAudioElement | null = null;
 let generatedVoiceAudio: HTMLAudioElement | null = null;
 let generatedVoiceUrl = "";
+let speechRunId = 0;
+let stopGeneratedSpeech: (() => void) | null = null;
+let stopPrivateVoiceSpeech: (() => void) | null = null;
+let assistantSpeechStartedAt = 0;
+let bargeInStartedAt = 0;
 let privateVoicePlaying = false;
 const notificationPermission = ref<"granted" | "denied" | "prompt">("prompt");
 const microphonePermissionStorageKey = "c3po.microphone-permission";
@@ -708,7 +713,7 @@ async function playPrivateVoice(
   const phrase = candidates[privateVoiceIndex % candidates.length];
   privateVoiceIndex += 1;
   privateVoiceAudio?.pause();
-  generatedVoiceAudio?.pause();
+  stopGeneratedSpeech?.();
   privateVoiceAudio = new Audio(`./private-audio/${phrase.file}`);
   privateVoiceAudio.preload = "auto";
   privateVoiceAudio.autoplay = true;
@@ -723,6 +728,9 @@ async function playPrivateVoice(
   voiceState.value = "speaking";
 
   const restoreVoiceState = () => {
+    stopPrivateVoiceSpeech = null;
+    assistantSpeechStartedAt = 0;
+    bargeInStartedAt = 0;
     privateVoicePlaying = false;
     const canResume = resumeListening && microphonePermission.value === "granted" && !silentMode.value;
     voiceState.value = canResume ? "listening" : (silentMode.value ? "paused" : "idle");
@@ -740,12 +748,18 @@ async function playPrivateVoice(
     restoreVoiceState();
     finishPlayback();
   };
+  stopPrivateVoiceSpeech = () => {
+    privateVoiceAudio?.pause();
+    restoreVoiceState();
+    finishPlayback();
+  };
   try {
     await writeLog("info", "voice.private-pack", `Запуск локальной фразы ${phrase.id}`, {
       category,
       file: phrase.file,
     });
     await privateVoiceAudio.play();
+    assistantSpeechStartedAt = performance.now();
     if (waitForCompletion) await playbackFinished;
     return true;
   } catch (error) {
@@ -1073,7 +1087,7 @@ async function handleRecognizedSpeech(text: string) {
   if (privateVoicePlaying) return;
   // Системные распознаватели записывают имя по-разному, поэтому принимаем
   // латинское C-3PO и наиболее частые русские транскрипции.
-  const wakeWord = /(?:\bc\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|\bc3po\b|\bс\s*[- ]?3\s*[- ]?п\s*[- ]?о\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио)/iu;
+  const wakeWord = /^\s*(?:c\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|c3po\b|с\s*[- ]?3\s*[- ]?п\s*[- ]?о\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио\b)/iu;
   const wakeMatch = text.match(wakeWord);
 
   if (!wakeMatch) {
@@ -1196,9 +1210,44 @@ function startAudioMeter(stream: MediaStream) {
     analyser.getByteFrequencyData(samples);
     const average = samples.reduce((sum, value) => sum + value, 0) / samples.length;
     audioLevel.value = Math.min(1, average / 55);
+
+    // Barge-in: echoCancellation подавляет собственный голос C-3PO, а
+    // устойчивый уровень поверх порога считаем новой речью пользователя.
+    // Небольшая задержка после старта не даёт первому аудиопику оборвать себя.
+    if (
+      voiceState.value === "speaking"
+      && assistantSpeechStartedAt > 0
+      && performance.now() - assistantSpeechStartedAt > 650
+      && audioLevel.value >= 0.32
+    ) {
+      if (!bargeInStartedAt) bargeInStartedAt = performance.now();
+      else if (performance.now() - bargeInStartedAt >= 220) interruptAssistantSpeech();
+    } else {
+      bargeInStartedAt = 0;
+    }
     meterFrame = window.requestAnimationFrame(update);
   };
   update();
+}
+
+function interruptAssistantSpeech() {
+  if (voiceState.value !== "speaking") return;
+  speechRunId += 1;
+  stopGeneratedSpeech?.();
+  stopPrivateVoiceSpeech?.();
+  privateVoiceAudio?.pause();
+  privateVoicePlaying = false;
+  assistantSpeechStartedAt = 0;
+  bargeInStartedAt = 0;
+  liveTranscript.value = "";
+  if (microphonePermission.value === "granted" && recognitionAvailable.value) {
+    voiceState.value = "listening";
+    shouldListen = true;
+    startRecognition();
+  } else {
+    voiceState.value = "idle";
+  }
+  void writeLog("info", "voice.barge-in", "Озвучка остановлена новой речью пользователя");
 }
 
 async function countMicrophones() {
@@ -1367,15 +1416,85 @@ async function ensureTtsServer() {
   }
 }
 
+function splitSpeechText(text: string, maxCharacters = 110) {
+  const chunks: string[] = [];
+  const sentences = text.trim().match(/[^.!?。！？]+[.!?。！？]*/gu) ?? [text.trim()];
+
+  for (const sentence of sentences.map((value) => value.trim()).filter(Boolean)) {
+    if (sentence.length <= maxCharacters) {
+      chunks.push(sentence);
+      continue;
+    }
+    let part = "";
+    for (const word of sentence.split(/\s+/u)) {
+      const candidate = part ? `${part} ${word}` : word;
+      if (candidate.length > maxCharacters && part) {
+        chunks.push(part);
+        part = word;
+      } else {
+        part = candidate;
+      }
+    }
+    if (part) chunks.push(part);
+  }
+  return chunks;
+}
+
+async function synthesizeSpeechChunk(text: string) {
+  if (!ttsStatus.value) throw new Error("Локальный голосовой процесс недоступен");
+  const response = await fetch(`${ttsStatus.value.address}/synthesize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, language: commandLanguage.value }),
+  });
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`Голосовой движок вернул ${response.status}: ${details.slice(0, 500)}`);
+  }
+  return response.blob();
+}
+
+async function playGeneratedSpeech(blob: Blob, runId: number) {
+  if (runId !== speechRunId) return;
+  generatedVoiceAudio?.pause();
+  if (generatedVoiceUrl) URL.revokeObjectURL(generatedVoiceUrl);
+  generatedVoiceUrl = URL.createObjectURL(blob);
+  generatedVoiceAudio = new Audio(generatedVoiceUrl);
+  generatedVoiceAudio.volume = 0.92;
+
+  await new Promise<void>((resolve, reject) => {
+    let finished = false;
+    const finish = (error?: unknown) => {
+      if (finished) return;
+      finished = true;
+      stopGeneratedSpeech = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    stopGeneratedSpeech = () => {
+      generatedVoiceAudio?.pause();
+      finish();
+    };
+    generatedVoiceAudio!.onended = () => finish();
+    generatedVoiceAudio!.onerror = () => finish(new Error("Не удалось воспроизвести сгенерированный звук"));
+    void generatedVoiceAudio!.play().catch(finish);
+  });
+}
+
 async function speak(text: string) {
   if (silentMode.value || !text.trim()) return;
+  stopGeneratedSpeech?.();
+  const runId = ++speechRunId;
   const resumeListening = shouldListen;
   shouldListen = false;
   privateVoicePlaying = true;
   recognition?.stop();
   voiceState.value = "speaking";
+  assistantSpeechStartedAt = performance.now();
 
   const restoreVoiceState = () => {
+    assistantSpeechStartedAt = 0;
+    bargeInStartedAt = 0;
     privateVoicePlaying = false;
     const canResume = resumeListening && microphonePermission.value === "granted" && !silentMode.value;
     voiceState.value = canResume ? "listening" : (silentMode.value ? "paused" : "idle");
@@ -1386,31 +1505,29 @@ async function speak(text: string) {
     if (!(await ensureTtsServer()) || !ttsStatus.value) {
       throw new Error(ttsStatus.value?.message ?? "Локальный голосовой компонент не установлен");
     }
+    const chunks = splitSpeechText(text.slice(0, 1200));
     await writeLog("info", "tts.synthesize", "Начата локальная озвучка полного ответа", {
       characters: text.length,
       language: commandLanguage.value,
+      chunks: chunks.length,
     });
-    const response = await fetch(`${ttsStatus.value.address}/synthesize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: text.slice(0, 1200), language: commandLanguage.value }),
-    });
-    if (!response.ok) {
-      const details = await response.text();
-      throw new Error(`Голосовой движок вернул ${response.status}: ${details.slice(0, 500)}`);
+    let pendingChunk = synthesizeSpeechChunk(chunks[0]);
+    for (let index = 0; index < chunks.length; index += 1) {
+      const audio = await pendingChunk;
+      if (runId !== speechRunId) return;
+      // Следующий фрагмент генерируется уже во время воспроизведения текущего.
+      // Это скрывает большую часть вычислительной задержки длинного ответа.
+      const nextChunk = index + 1 < chunks.length
+        ? synthesizeSpeechChunk(chunks[index + 1])
+        : null;
+      await playGeneratedSpeech(audio, runId);
+      if (nextChunk) pendingChunk = nextChunk;
     }
-    generatedVoiceAudio?.pause();
-    if (generatedVoiceUrl) URL.revokeObjectURL(generatedVoiceUrl);
-    generatedVoiceUrl = URL.createObjectURL(await response.blob());
-    generatedVoiceAudio = new Audio(generatedVoiceUrl);
-    generatedVoiceAudio.volume = 0.92;
-    generatedVoiceAudio.onended = restoreVoiceState;
-    generatedVoiceAudio.onerror = restoreVoiceState;
-    await generatedVoiceAudio.play();
     synthesisAvailable.value = true;
     selectedVoiceName.value = "Локальный голос пользователя";
+    if (runId === speechRunId) restoreVoiceState();
   } catch (error) {
-    restoreVoiceState();
+    if (runId === speechRunId) restoreVoiceState();
     const details = errorDetails(error);
     await writeLog("error", "tts.synthesize", `${details.name}: ${details.message}`);
     // Ответ уже находится в чате. Не подменяем его случайной заготовленной
@@ -1696,7 +1813,9 @@ async function toggleSilentMode() {
     pauseMicrophone();
     window.speechSynthesis?.cancel();
     privateVoiceAudio?.pause();
-    generatedVoiceAudio?.pause();
+    speechRunId += 1;
+    stopGeneratedSpeech?.();
+    stopPrivateVoiceSpeech?.();
     return;
   }
   if (await hasRememberedMicrophoneApproval()) await requestMicrophone();
@@ -1726,6 +1845,9 @@ onMounted(async () => {
     if (ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound) {
       synthesisAvailable.value = true;
       selectedVoiceName.value = "Локальный голос пользователя";
+      // Запускаем локальный процесс заранее. Пока пользователь слушает
+      // приветствие и формулирует вопрос, Chatterbox загружает веса с диска.
+      void ensureTtsServer();
     }
   }
   configureRecognition();
@@ -1737,10 +1859,12 @@ onMounted(async () => {
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
   // позволяют заметить устойчивый рост памяти во время долгой работы.
   memoryTimer = window.setInterval(refreshProcessMetrics, 5_000);
-  // Сначала произносим приветствие, затем включаем микрофон. Так голос самого
-  // C-3PO гарантированно не попадёт обратно в распознавание как команда.
-  await playPrivateVoice("startup", true, true);
+  // Если macOS уже запомнила разрешение, сначала подключаем анализатор уровня
+  // микрофона. Благодаря этому даже стартовое приветствие можно немедленно
+  // прервать своей речью. Само распознавание на время фразы приостанавливается
+  // внутри playPrivateVoice, поэтому C-3PO не принимает свой голос за команду.
   await inspectMicrophonePermission();
+  await playPrivateVoice("startup", true, true);
 });
 
 onBeforeUnmount(() => {
@@ -1750,7 +1874,9 @@ onBeforeUnmount(() => {
   audioContext?.close();
   droidAudioContext?.close();
   privateVoiceAudio?.pause();
-  generatedVoiceAudio?.pause();
+  speechRunId += 1;
+  stopGeneratedSpeech?.();
+  stopPrivateVoiceSpeech?.();
   if (generatedVoiceUrl) URL.revokeObjectURL(generatedVoiceUrl);
 });
 </script>

@@ -146,4 +146,16 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     Path(os.environ["NUMBA_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
     print(f"C-3PO TTS listening on http://{HOST}:{PORT}", flush=True)
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+
+    # Прогреваем модель сразу после запуска локального сервиса. HTTP уже
+    # принимает /health, а первый настоящий ответ не тратит время на загрузку
+    # весов с диска. Если прогрев завершится ошибкой, POST вернёт её в журнал.
+    def warm_up():
+        try:
+            load_model()
+        except Exception as error:
+            print(f"Warm-up failed: {type(error).__name__}: {error}", flush=True)
+
+    threading.Thread(target=warm_up, name="c3po-tts-warmup", daemon=True).start()
+    server.serve_forever()

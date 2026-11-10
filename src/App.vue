@@ -17,6 +17,13 @@ type UserProfile = {
   createdAt: string;
 };
 
+type ConversationThread = {
+  id: string;
+  title: string;
+  updatedAt: string;
+  messages: Message[];
+};
+
 type SystemInfo = {
   operatingSystem: string;
   osVersion: string;
@@ -168,16 +175,37 @@ const profileLabels: Record<LanguageCode, { current: string; newUser: string; lo
   ar: { current: "المتحدث الحالي", newUser: "التعرف على شخص جديد", localMemory: "تبقى الأسماء والسجل على هذا الكمبيوتر فقط." },
 };
 
+const dialogLabels: Record<LanguageCode, { list: string; newDialog: string; empty: string }> = {
+  ru: { list: "История диалогов", newDialog: "Новый диалог", empty: "Диалогов пока нет" },
+  en: { list: "Conversation history", newDialog: "New conversation", empty: "No conversations yet" },
+  es: { list: "Historial de conversaciones", newDialog: "Nueva conversación", empty: "Aún no hay conversaciones" },
+  de: { list: "Gesprächsverlauf", newDialog: "Neues Gespräch", empty: "Noch keine Gespräche" },
+  fr: { list: "Historique des dialogues", newDialog: "Nouveau dialogue", empty: "Aucun dialogue" },
+  it: { list: "Cronologia dialoghi", newDialog: "Nuovo dialogo", empty: "Nessun dialogo" },
+  pt: { list: "Histórico de conversas", newDialog: "Nova conversa", empty: "Nenhuma conversa" },
+  zh: { list: "对话历史", newDialog: "新对话", empty: "暂无对话" },
+  ja: { list: "会話履歴", newDialog: "新しい会話", empty: "会話はまだありません" },
+  ar: { list: "سجل المحادثات", newDialog: "محادثة جديدة", empty: "لا توجد محادثات بعد" },
+};
+
 function introductionPrompt(language: LanguageCode) {
   return profilePhrases[language].intro;
 }
 
-function readConversation(profileId: string): Message[] {
+function readConversationThreads(profileId: string): ConversationThread[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(`c3po.conversation.${profileId}`) ?? "[]");
-    return Array.isArray(value)
-      ? value.filter((item) => Number.isInteger(item?.id) && (item?.role === "assistant" || item?.role === "user") && typeof item?.text === "string")
-      : [];
+    const value = JSON.parse(window.localStorage.getItem(`c3po.conversations.${profileId}`) ?? "[]");
+    if (Array.isArray(value) && value.length) return value as ConversationThread[];
+
+    // Однократная миграция истории из первой версии, где у профиля был один чат.
+    const legacy = JSON.parse(window.localStorage.getItem(`c3po.conversation.${profileId}`) ?? "[]") as Message[];
+    if (!Array.isArray(legacy) || !legacy.length) return [];
+    return [{
+      id: crypto.randomUUID(),
+      title: legacy.find((message) => message.role === "user")?.text.slice(0, 42) || t("dialogTitle"),
+      updatedAt: new Date().toISOString(),
+      messages: legacy,
+    }];
   } catch {
     return [];
   }
@@ -191,10 +219,25 @@ function saveProfiles() {
 
 function saveConversation() {
   if (!currentProfileId.value) return;
-  // Храним только ограниченную историю, чтобы локальная память не росла бесконечно.
+  let thread = conversationThreads.value.find((item) => item.id === activeConversationId.value);
+  if (!thread) {
+    thread = {
+      id: crypto.randomUUID(),
+      title: t("dialogTitle"),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    };
+    activeConversationId.value = thread.id;
+    conversationThreads.value.unshift(thread);
+  }
+  const firstUserMessage = messages.value.find((message) => message.role === "user");
+  thread.title = firstUserMessage?.text.trim().slice(0, 42) || t("dialogTitle");
+  thread.updatedAt = new Date().toISOString();
+  thread.messages = messages.value.slice(-100);
+  conversationThreads.value.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   window.localStorage.setItem(
-    `c3po.conversation.${currentProfileId.value}`,
-    JSON.stringify(messages.value.slice(-100)),
+    `c3po.conversations.${currentProfileId.value}`,
+    JSON.stringify(conversationThreads.value),
   );
 }
 
@@ -236,6 +279,8 @@ function rememberIntroducedUser(text: string) {
   if (!existing) profiles.value.push(profile);
   currentProfileId.value = profile.id;
   awaitingIntroduction.value = false;
+  conversationThreads.value = [];
+  activeConversationId.value = "";
   messages.value = [];
   nextMessageId.value = 1;
   saveProfiles();
@@ -251,6 +296,8 @@ function rememberIntroducedUser(text: string) {
 function startNewSpeaker() {
   currentProfileId.value = "";
   awaitingIntroduction.value = true;
+  conversationThreads.value = [];
+  activeConversationId.value = "";
   saveProfiles();
   messages.value = [];
   nextMessageId.value = 1;
@@ -270,13 +317,51 @@ function switchProfile() {
   }
   awaitingIntroduction.value = false;
   saveProfiles();
-  const saved = readConversation(profile.id);
-  messages.value = saved.length ? saved : [{ id: 1, role: "assistant", text: `${t("greeting")} ${profile.name}.` }];
+  conversationThreads.value = readConversationThreads(profile.id);
+  const recentThread = conversationThreads.value[0];
+  activeConversationId.value = recentThread?.id ?? "";
+  messages.value = recentThread?.messages.length
+    ? recentThread.messages
+    : [{ id: 1, role: "assistant", text: `${t("greeting")} ${profile.name}.` }];
   nextMessageId.value = Math.max(1, ...messages.value.map((message) => message.id)) + 1;
+  conversationListOpen.value = false;
 }
 
-const savedInitialConversation = initialProfile ? readConversation(initialProfile.id) : [];
-const messages = ref<Message[]>(savedInitialConversation.length ? savedInitialConversation : [
+function startNewConversation() {
+  if (!currentProfile.value) {
+    startNewSpeaker();
+    return;
+  }
+  activeConversationId.value = crypto.randomUUID();
+  messages.value = [{ id: 1, role: "assistant", text: `${t("greeting")} ${currentProfile.value.name}.` }];
+  nextMessageId.value = 2;
+  conversationListOpen.value = false;
+  saveConversation();
+}
+
+function openConversation(thread: ConversationThread) {
+  activeConversationId.value = thread.id;
+  messages.value = thread.messages;
+  nextMessageId.value = Math.max(1, ...messages.value.map((message) => message.id)) + 1;
+  conversationListOpen.value = false;
+  void scrollChat();
+}
+
+function formatConversationDate(value: string) {
+  return new Intl.DateTimeFormat(interfaceLanguage.value, {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+const initialConversationThreads = initialProfile ? readConversationThreads(initialProfile.id) : [];
+const initialConversation = initialConversationThreads[0] ?? null;
+const conversationThreads = ref<ConversationThread[]>(initialConversationThreads);
+const activeConversationId = ref(initialConversation?.id ?? "");
+const conversationListOpen = ref(false);
+const messages = ref<Message[]>(initialConversation?.messages.length ? initialConversation.messages : [
   {
     id: 1,
     role: "assistant",
@@ -1084,8 +1169,14 @@ function saveInterfaceLanguage() {
   window.localStorage.setItem("c3po.interface-language", interfaceLanguage.value);
   document.documentElement.lang = interfaceLanguage.value;
   document.documentElement.dir = interfaceLanguage.value === "ar" ? "rtl" : "ltr";
-  if (messages.value.length === 1) messages.value[0].text = t("greeting");
-  if (!liveTranscript.value) lastCommand.value = t("sayCommand");
+  if (messages.value.length === 1) {
+    messages.value[0].text = awaitingIntroduction.value
+      ? introductionPrompt(commandLanguage.value)
+      : `${t("greeting")} ${currentProfile.value?.name ?? ""}`.trim();
+  }
+  if (!liveTranscript.value) {
+    lastCommand.value = awaitingIntroduction.value ? introductionPrompt(commandLanguage.value) : t("sayCommand");
+  }
 }
 
 function saveCommandLanguage() {
@@ -1270,7 +1361,15 @@ onBeforeUnmount(() => {
               <h2>{{ t("dialogTitle") }}</h2>
             </div>
           </div>
-          <button type="button" :aria-label="t('close')" @click="chatOpen = false">×</button>
+          <div class="drawer-header-actions">
+            <button
+              type="button"
+              :class="{ active: conversationListOpen }"
+              :aria-label="dialogLabels[interfaceLanguage].list"
+              @click="conversationListOpen = !conversationListOpen"
+            >☷</button>
+            <button type="button" :aria-label="t('close')" @click="chatOpen = false">×</button>
+          </div>
         </header>
 
         <div class="chat-context">
@@ -1282,14 +1381,39 @@ onBeforeUnmount(() => {
           <b>{{ commandLanguage.toUpperCase() }}</b>
         </div>
 
-        <div ref="conversation" class="drawer-messages">
+        <section v-if="conversationListOpen" class="conversation-browser">
+          <header>
+            <div>
+              <span class="eyebrow">{{ t("history") }}</span>
+              <h3>{{ dialogLabels[interfaceLanguage].list }}</h3>
+            </div>
+            <button type="button" @click="startNewConversation">＋ {{ dialogLabels[interfaceLanguage].newDialog }}</button>
+          </header>
+          <p v-if="!conversationThreads.length" class="conversation-empty">
+            {{ dialogLabels[interfaceLanguage].empty }}
+          </p>
+          <button
+            v-for="thread in conversationThreads"
+            :key="thread.id"
+            class="conversation-item"
+            :class="{ active: thread.id === activeConversationId }"
+            type="button"
+            @click="openConversation(thread)"
+          >
+            <span>◇</span>
+            <span><strong>{{ thread.title }}</strong><small>{{ formatConversationDate(thread.updatedAt) }}</small></span>
+            <b>→</b>
+          </button>
+        </section>
+
+        <div v-else ref="conversation" class="drawer-messages">
           <div v-for="message in messages" :key="message.id" class="drawer-message" :class="message.role">
             <span v-if="message.role === 'assistant'" class="small-avatar">C</span>
             <p>{{ message.text }}</p>
           </div>
         </div>
 
-        <form class="drawer-composer" @submit.prevent="submitMessage">
+        <form v-if="!conversationListOpen" class="drawer-composer" @submit.prevent="submitMessage">
           <span class="composer-language">{{ commandLanguage.toUpperCase() }}</span>
           <textarea
             v-model="input"

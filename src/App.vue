@@ -119,13 +119,16 @@ const commandLanguage = ref<LanguageCode>(isLanguageCode(storedCommandLanguage) 
 function readProfiles(): UserProfile[] {
   try {
     const value = JSON.parse(window.localStorage.getItem("c3po.user-profiles") ?? "[]");
-    return Array.isArray(value) ? value.filter((item) => item?.id && item?.name) : [];
+    return Array.isArray(value) ? value.filter((item) => item?.id && looksLikePersonName(item?.name)) : [];
   } catch {
     return [];
   }
 }
 
 const profiles = ref<UserProfile[]>(readProfiles());
+// Перезаписываем список после проверки, чтобы удалить ранее ошибочно
+// сохранённые ответы вроде «хочу» или «да».
+window.localStorage.setItem("c3po.user-profiles", JSON.stringify(profiles.value));
 const storedProfileId = window.localStorage.getItem("c3po.current-profile");
 const initialProfile = profiles.value.find((profile) => profile.id === storedProfileId) ?? profiles.value[0] ?? null;
 const currentProfileId = ref(initialProfile?.id ?? "");
@@ -139,17 +142,151 @@ function commandText(key: keyof (typeof translations)["ru"]) {
   return translations[commandLanguage.value][key];
 }
 
-const messages = ref<Message[]>([
+const profilePhrases: Record<LanguageCode, { intro: string; met: string; newUser: string }> = {
+  ru: { intro: "Давайте познакомимся. Как вас зовут?", met: "Очень приятно познакомиться", newUser: "Я слышу нового собеседника. Пожалуйста, представьтесь." },
+  en: { intro: "Let us get acquainted. What is your name?", met: "It is a pleasure to meet you", newUser: "I hear a new speaker. Please introduce yourself." },
+  es: { intro: "Conozcámonos. ¿Cómo te llamas?", met: "Encantado de conocerte", newUser: "Escucho a un nuevo usuario. Por favor, preséntate." },
+  de: { intro: "Lernen wir uns kennen. Wie heißen Sie?", met: "Sehr erfreut", newUser: "Ich höre eine neue Person. Bitte stellen Sie sich vor." },
+  fr: { intro: "Faisons connaissance. Comment vous appelez-vous ?", met: "Enchanté de vous rencontrer", newUser: "J’entends une nouvelle personne. Veuillez vous présenter." },
+  it: { intro: "Conosciamoci. Come ti chiami?", met: "Piacere di conoscerti", newUser: "Sento una nuova persona. Per favore, presentati." },
+  pt: { intro: "Vamos nos conhecer. Como você se chama?", met: "Prazer em conhecer você", newUser: "Ouço uma nova pessoa. Por favor, apresente-se." },
+  zh: { intro: "让我们认识一下。您叫什么名字？", met: "很高兴认识您", newUser: "我听到了一位新用户。请介绍一下自己。" },
+  ja: { intro: "はじめまして。お名前を教えてください。", met: "お会いできて光栄です", newUser: "新しい方ですね。お名前を教えてください。" },
+  ar: { intro: "لنتعارف. ما اسمك؟", met: "سعيد بلقائك", newUser: "أسمع متحدثًا جديدًا. يرجى التعريف بنفسك." },
+};
+
+const profileLabels: Record<LanguageCode, { current: string; newUser: string; localMemory: string }> = {
+  ru: { current: "Текущий собеседник", newUser: "Познакомиться с новым человеком", localMemory: "Имена и история хранятся только на этом компьютере." },
+  en: { current: "Current speaker", newUser: "Meet a new person", localMemory: "Names and history stay on this computer." },
+  es: { current: "Usuario actual", newUser: "Conocer a otra persona", localMemory: "Los nombres y el historial permanecen en este equipo." },
+  de: { current: "Aktuelle Person", newUser: "Neue Person kennenlernen", localMemory: "Namen und Verlauf bleiben auf diesem Computer." },
+  fr: { current: "Interlocuteur actuel", newUser: "Rencontrer une autre personne", localMemory: "Les noms et l’historique restent sur cet ordinateur." },
+  it: { current: "Persona attuale", newUser: "Conosci una nuova persona", localMemory: "Nomi e cronologia restano su questo computer." },
+  pt: { current: "Pessoa atual", newUser: "Conhecer uma nova pessoa", localMemory: "Nomes e histórico ficam neste computador." },
+  zh: { current: "当前用户", newUser: "认识新用户", localMemory: "姓名和历史记录仅保存在此电脑上。" },
+  ja: { current: "現在のユーザー", newUser: "新しい人と話す", localMemory: "名前と履歴はこのコンピューターだけに保存されます。" },
+  ar: { current: "المتحدث الحالي", newUser: "التعرف على شخص جديد", localMemory: "تبقى الأسماء والسجل على هذا الكمبيوتر فقط." },
+};
+
+function introductionPrompt(language: LanguageCode) {
+  return profilePhrases[language].intro;
+}
+
+function readConversation(profileId: string): Message[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(`c3po.conversation.${profileId}`) ?? "[]");
+    return Array.isArray(value)
+      ? value.filter((item) => Number.isInteger(item?.id) && (item?.role === "assistant" || item?.role === "user") && typeof item?.text === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveProfiles() {
+  window.localStorage.setItem("c3po.user-profiles", JSON.stringify(profiles.value));
+  if (currentProfileId.value) window.localStorage.setItem("c3po.current-profile", currentProfileId.value);
+  else window.localStorage.removeItem("c3po.current-profile");
+}
+
+function saveConversation() {
+  if (!currentProfileId.value) return;
+  // Храним только ограниченную историю, чтобы локальная память не росла бесконечно.
+  window.localStorage.setItem(
+    `c3po.conversation.${currentProfileId.value}`,
+    JSON.stringify(messages.value.slice(-100)),
+  );
+}
+
+function extractIntroducedName(text: string) {
+  return text
+    .replace(/^(меня зовут|я|my name is|i am|i'm|me llamo|soy|ich heiße|ich bin|je m'appelle|je suis|mi chiamo|sono|meu nome é|eu sou|我叫|私は|اسمي)\s+/i, "")
+    .replace(/[.!?。！？]+$/u, "")
+    .trim()
+    .slice(0, 40);
+}
+
+function looksLikePersonName(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const name = value.trim().toLocaleLowerCase();
+  const nonNames = new Set([
+    "хочу", "да", "нет", "привет", "здравствуйте", "хорошо", "конечно", "готов",
+    "yes", "no", "hello", "hi", "okay", "ready", "i want",
+    "sí", "no", "hola", "ja", "nein", "hallo", "oui", "bonjour",
+    "ciao", "sim", "olá", "你好", "はい", "いいえ", "نعم", "لا", "مرحبا",
+  ]);
+  const wordCount = name.split(/\s+/u).length;
+  return name.length <= 40
+    && wordCount <= 3
+    && !nonNames.has(name)
+    && /^[\p{L}\p{M}][\p{L}\p{M}'’ -]*$/u.test(name);
+}
+
+function rememberIntroducedUser(text: string) {
+  const name = extractIntroducedName(text);
+  if (!looksLikePersonName(name)) {
+    const response = introductionPrompt(commandLanguage.value);
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    return false;
+  }
+  const existing = profiles.value.find((profile) => profile.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  const profile = existing ?? { id: crypto.randomUUID(), name, createdAt: new Date().toISOString() };
+  if (!existing) profiles.value.push(profile);
+  currentProfileId.value = profile.id;
+  awaitingIntroduction.value = false;
+  messages.value = [];
+  nextMessageId.value = 1;
+  saveProfiles();
+  const response = `${profilePhrases[commandLanguage.value].met}, ${profile.name}.`;
+  addMessage("assistant", response);
+  lastCommand.value = response;
+  languageOpen.value = false;
+  chatOpen.value = true;
+  speak(response);
+  return true;
+}
+
+function startNewSpeaker() {
+  currentProfileId.value = "";
+  awaitingIntroduction.value = true;
+  saveProfiles();
+  messages.value = [];
+  nextMessageId.value = 1;
+  const response = profilePhrases[commandLanguage.value].newUser;
+  addMessage("assistant", response);
+  lastCommand.value = response;
+  languageOpen.value = false;
+  chatOpen.value = true;
+  speak(response);
+}
+
+function switchProfile() {
+  const profile = currentProfile.value;
+  if (!profile) {
+    startNewSpeaker();
+    return;
+  }
+  awaitingIntroduction.value = false;
+  saveProfiles();
+  const saved = readConversation(profile.id);
+  messages.value = saved.length ? saved : [{ id: 1, role: "assistant", text: `${t("greeting")} ${profile.name}.` }];
+  nextMessageId.value = Math.max(1, ...messages.value.map((message) => message.id)) + 1;
+}
+
+const savedInitialConversation = initialProfile ? readConversation(initialProfile.id) : [];
+const messages = ref<Message[]>(savedInitialConversation.length ? savedInitialConversation : [
   {
     id: 1,
     role: "assistant",
     text: initialProfile ? `${t("greeting")} ${initialProfile.name}.` : introductionPrompt(commandLanguage.value),
   },
 ]);
-const nextMessageId = ref(2);
+const nextMessageId = ref(Math.max(1, ...messages.value.map((message) => message.id)) + 1);
 const input = ref("");
 const liveTranscript = ref("");
-const lastCommand = ref("Скажите команду…");
+const lastCommand = ref(initialProfile ? t("sayCommand") : introductionPrompt(commandLanguage.value));
 const pendingAction = ref(false);
 const isWorking = ref(false);
 const chatOpen = ref(false);
@@ -380,6 +517,7 @@ async function askLocalModel(prompt: string, showInConversation = true) {
     const reply = await invoke<LocalReply>("generate_local_reply", {
       prompt,
       language: selectedCommandLanguage.value.modelName,
+      userName: currentProfile.value?.name ?? null,
     });
     llmTestReply.value = reply.text;
     lastCommand.value = reply.text;
@@ -515,6 +653,7 @@ async function scrollChat() {
 
 function addMessage(role: Message["role"], text: string) {
   messages.value.push({ id: nextMessageId.value++, role, text });
+  saveConversation();
   void scrollChat();
 }
 
@@ -870,6 +1009,16 @@ function processVoiceCommand(text: string) {
   liveTranscript.value = "";
   addMessage("user", text);
 
+  if (awaitingIntroduction.value) {
+    rememberIntroducedUser(text);
+    return;
+  }
+
+  if (/(другой пользователь|новый пользователь|another user|new user|otro usuario|neuer benutzer|nouvel utilisateur|nuovo utente|novo usuário|新用户|別のユーザー|مستخدم جديد)/i.test(normalized)) {
+    startNewSpeaker();
+    return;
+  }
+
   if (pendingAction.value && /(выполн|разреш|подтверж|да)/.test(normalized)) {
     void approveAction();
     return;
@@ -994,21 +1143,21 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="header-actions">
-        <button class="ghost-button model-button" type="button" @click="openLlmPanel">
+        <button class="ghost-button model-button" type="button" :aria-label="llmShortLabel" @click="openLlmPanel">
           <span class="button-icon">◈</span>
           <span>{{ llmShortLabel }}</span>
           <i :class="llmStatus?.state === 'ready' ? 'granted' : 'prompt'"></i>
         </button>
-        <button class="ghost-button language-button" type="button" @click="languageOpen = true">
+        <button class="ghost-button language-button" type="button" :aria-label="t('languageSettings')" @click="languageOpen = true">
           <span class="button-icon">文</span>
           <span>{{ interfaceLanguage.toUpperCase() }} · {{ commandLanguage.toUpperCase() }}</span>
         </button>
-        <button class="ghost-button" type="button" @click="openPermissions">
+        <button class="ghost-button" type="button" :aria-label="t('permissions')" @click="openPermissions">
           <span class="button-icon">⌾</span>
           <span>{{ t("permissions") }}</span>
           <i :class="microphonePermission"></i>
         </button>
-        <button class="chat-button" type="button" @click="chatOpen = true">
+        <button class="chat-button" type="button" :aria-label="t('openChat')" @click="chatOpen = true">
           <span>{{ t("openChat") }}</span>
           <b>{{ Math.max(0, messages.length - 1) }}</b>
         </button>
@@ -1112,14 +1261,26 @@ onBeforeUnmount(() => {
     </main>
 
     <div v-if="chatOpen" class="drawer-backdrop" @click.self="chatOpen = false">
-      <aside class="chat-drawer" aria-label="Текстовый диалог">
+      <aside class="chat-drawer" :aria-label="t('dialogTitle')">
         <header>
-          <div>
-            <span class="eyebrow">{{ t("history") }}</span>
-            <h2>{{ t("dialogTitle") }}</h2>
+          <div class="drawer-title">
+            <span class="drawer-avatar">C</span>
+            <div>
+              <span class="eyebrow">{{ t("history") }}</span>
+              <h2>{{ t("dialogTitle") }}</h2>
+            </div>
           </div>
           <button type="button" :aria-label="t('close')" @click="chatOpen = false">×</button>
         </header>
+
+        <div class="chat-context">
+          <span class="context-light"></span>
+          <div>
+            <strong>C-3PO ↔ {{ currentProfile?.name || "…" }}</strong>
+            <small>{{ profileLabels[interfaceLanguage].localMemory }}</small>
+          </div>
+          <b>{{ commandLanguage.toUpperCase() }}</b>
+        </div>
 
         <div ref="conversation" class="drawer-messages">
           <div v-for="message in messages" :key="message.id" class="drawer-message" :class="message.role">
@@ -1129,11 +1290,12 @@ onBeforeUnmount(() => {
         </div>
 
         <form class="drawer-composer" @submit.prevent="submitMessage">
+          <span class="composer-language">{{ commandLanguage.toUpperCase() }}</span>
           <textarea
             v-model="input"
             rows="2"
             :placeholder="t('enterCommand')"
-            aria-label="Текстовая команда"
+            :aria-label="t('enterCommand')"
             @keydown.enter.exact.prevent="submitMessage"
           ></textarea>
           <button type="submit" :disabled="!canSend">↑</button>
@@ -1144,34 +1306,67 @@ onBeforeUnmount(() => {
     <div v-if="languageOpen" class="modal-backdrop" @click.self="languageOpen = false">
       <section class="permission-modal language-modal" :aria-label="t('languageSettings')">
         <header>
-          <div>
+          <div class="language-title">
+            <span class="language-emblem">文</span>
+            <div>
             <span class="eyebrow">{{ t("language") }}</span>
             <h2>{{ t("languageSettings") }}</h2>
+            </div>
           </div>
           <button type="button" :aria-label="t('close')" @click="languageOpen = false">×</button>
         </header>
 
         <div class="language-fields">
-          <label>
-            <span>{{ t("interfaceLanguage") }}</span>
-            <select v-model="interfaceLanguage" @change="saveInterfaceLanguage">
-              <option v-for="language in languages" :key="language.code" :value="language.code">
-                {{ language.nativeName }}
-              </option>
-            </select>
+          <label class="language-card">
+            <span class="language-card-icon">Aa</span>
+            <span class="language-card-copy">
+              <strong>{{ t("interfaceLanguage") }}</strong>
+              <small>{{ languages.find((item) => item.code === interfaceLanguage)?.nativeName }}</small>
+            </span>
+            <span class="select-shell">
+              <select v-model="interfaceLanguage" @change="saveInterfaceLanguage">
+                <option v-for="language in languages" :key="language.code" :value="language.code">
+                  {{ language.nativeName }}
+                </option>
+              </select>
+            </span>
           </label>
-          <label>
-            <span>{{ t("commandLanguage") }}</span>
-            <select v-model="commandLanguage" @change="saveCommandLanguage">
-              <option v-for="language in languages" :key="language.code" :value="language.code">
-                {{ language.nativeName }}
-              </option>
-            </select>
+          <label class="language-card">
+            <span class="language-card-icon voice-language-icon">◌</span>
+            <span class="language-card-copy">
+              <strong>{{ t("commandLanguage") }}</strong>
+              <small>{{ selectedCommandLanguage.speechCode }} · R2-D2</small>
+            </span>
+            <span class="select-shell">
+              <select v-model="commandLanguage" @change="saveCommandLanguage">
+                <option v-for="language in languages" :key="language.code" :value="language.code">
+                  {{ language.nativeName }}
+                </option>
+              </select>
+            </span>
           </label>
         </div>
 
-        <p class="permission-note">{{ t("languageHint") }}</p>
+        <div class="profile-settings">
+          <div class="profile-heading">
+            <span class="profile-avatar">{{ currentProfile?.name?.charAt(0).toUpperCase() || "?" }}</span>
+            <div>
+              <strong>{{ profileLabels[interfaceLanguage].current }}</strong>
+              <small>{{ profileLabels[interfaceLanguage].localMemory }}</small>
+            </div>
+          </div>
+          <label v-if="profiles.length">
+            <select v-model="currentProfileId" @change="switchProfile">
+              <option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+            </select>
+          </label>
+          <button type="button" @click="startNewSpeaker">
+            <span>＋</span>{{ profileLabels[interfaceLanguage].newUser }}
+          </button>
+        </div>
+
         <div class="language-actions">
+          <small><span>✓</span>{{ t("languageHint") }}</small>
           <button class="approve-button" type="button" @click="languageOpen = false">{{ t("done") }}</button>
         </div>
       </section>

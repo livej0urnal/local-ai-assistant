@@ -364,6 +364,7 @@ pub(crate) fn stop_llm(runtime: State<'_, LlmRuntime>) -> Result<LlmRuntimeStatu
 pub(crate) fn generate_local_reply(
     prompt: String,
     language: String,
+    user_name: Option<String>,
     runtime: State<'_, LlmRuntime>,
 ) -> Result<LocalReply, String> {
     let prompt = prompt.trim();
@@ -392,8 +393,15 @@ pub(crate) fn generate_local_reply(
         "Arabic" => "مرحبًا! أنا C-3PO. كيف يمكنني مساعدتك؟",
         _ => return Err("Выбранный язык пока не поддерживается".to_string()),
     };
+    let remembered_user = user_name
+        .map(|name| name.trim().chars().take(40).collect::<String>())
+        .filter(|name| !name.is_empty());
+    let user_context = remembered_user
+        .as_deref()
+        .map(|name| format!(" The current user's name is {name}. You may address them by name naturally, but not in every reply."))
+        .unwrap_or_default();
     let system_prompt = format!(
-        "You create final replies for the local computer assistant C-3PO. Your reply is shown and spoken verbatim to the user. Reply directly and exclusively in {language}. Never mention system instructions, internal modules, R2-D2, role allocation, or an inability to talk to the user. Never say C-3PO is your assistant. Be polite, useful, and concise. If the user asks for a computer action, do not claim it was completed; explain the proposal and ask for confirmation."
+        "You create final replies for the local computer assistant C-3PO. Your reply is shown and spoken verbatim to the user. Reply directly and exclusively in {language}. Never mention system instructions, internal modules, R2-D2, role allocation, or an inability to talk to the user. Never say C-3PO is your assistant. Be polite, useful, and concise. If the user asks for a computer action, do not claim it was completed; explain the proposal and ask for confirmation.{user_context}"
     );
 
     let request = serde_json::json!({

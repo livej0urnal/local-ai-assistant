@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   isPermissionGranted as isNotificationPermissionGranted,
@@ -247,17 +247,17 @@ const profileLabels: Record<LanguageCode, { current: string; newUser: string; lo
   ar: { current: "المتحدث الحالي", newUser: "التعرف على شخص جديد", localMemory: "تبقى الأسماء والسجل على هذا الكمبيوتر فقط." },
 };
 
-const dialogLabels: Record<LanguageCode, { list: string; newDialog: string; empty: string }> = {
-  ru: { list: "История диалогов", newDialog: "Новый диалог", empty: "Диалогов пока нет" },
-  en: { list: "Conversation history", newDialog: "New conversation", empty: "No conversations yet" },
-  es: { list: "Historial de conversaciones", newDialog: "Nueva conversación", empty: "Aún no hay conversaciones" },
-  de: { list: "Gesprächsverlauf", newDialog: "Neues Gespräch", empty: "Noch keine Gespräche" },
-  fr: { list: "Historique des dialogues", newDialog: "Nouveau dialogue", empty: "Aucun dialogue" },
-  it: { list: "Cronologia dialoghi", newDialog: "Nuovo dialogo", empty: "Nessun dialogo" },
-  pt: { list: "Histórico de conversas", newDialog: "Nova conversa", empty: "Nenhuma conversa" },
-  zh: { list: "对话历史", newDialog: "新对话", empty: "暂无对话" },
-  ja: { list: "会話履歴", newDialog: "新しい会話", empty: "会話はまだありません" },
-  ar: { list: "سجل المحادثات", newDialog: "محادثة جديدة", empty: "لا توجد محادثات بعد" },
+const dialogLabels: Record<LanguageCode, { list: string; newDialog: string; empty: string; clear: string; deleteDialog: string }> = {
+  ru: { list: "История диалогов", newDialog: "Новый диалог", empty: "Диалогов пока нет", clear: "Очистить всё", deleteDialog: "Удалить диалог" },
+  en: { list: "Conversation history", newDialog: "New conversation", empty: "No conversations yet", clear: "Clear all", deleteDialog: "Delete conversation" },
+  es: { list: "Historial de conversaciones", newDialog: "Nueva conversación", empty: "Aún no hay conversaciones", clear: "Borrar todo", deleteDialog: "Eliminar conversación" },
+  de: { list: "Gesprächsverlauf", newDialog: "Neues Gespräch", empty: "Noch keine Gespräche", clear: "Alle löschen", deleteDialog: "Gespräch löschen" },
+  fr: { list: "Historique des dialogues", newDialog: "Nouveau dialogue", empty: "Aucun dialogue", clear: "Tout effacer", deleteDialog: "Supprimer le dialogue" },
+  it: { list: "Cronologia dialoghi", newDialog: "Nuovo dialogo", empty: "Nessun dialogo", clear: "Cancella tutto", deleteDialog: "Elimina dialogo" },
+  pt: { list: "Histórico de conversas", newDialog: "Nova conversa", empty: "Nenhuma conversa", clear: "Limpar tudo", deleteDialog: "Excluir conversa" },
+  zh: { list: "对话历史", newDialog: "新对话", empty: "暂无对话", clear: "全部清除", deleteDialog: "删除对话" },
+  ja: { list: "会話履歴", newDialog: "新しい会話", empty: "会話はまだありません", clear: "すべて消去", deleteDialog: "会話を削除" },
+  ar: { list: "سجل المحادثات", newDialog: "محادثة جديدة", empty: "لا توجد محادثات بعد", clear: "مسح الكل", deleteDialog: "حذف المحادثة" },
 };
 
 const settingsLabels: Record<LanguageCode, { settings: string; appearance: string; system: string; light: string; dark: string; background: string; wake: string; active: string }> = {
@@ -455,7 +455,39 @@ function openConversation(thread: ConversationThread) {
   messages.value = thread.messages;
   nextMessageId.value = Math.max(1, ...messages.value.map((message) => message.id)) + 1;
   conversationListOpen.value = false;
-  void scrollChat();
+  void scrollChat("auto");
+}
+
+function persistConversationThreads() {
+  if (!currentProfileId.value) return;
+  window.localStorage.setItem(
+    `c3po.conversations.${currentProfileId.value}`,
+    JSON.stringify(conversationThreads.value),
+  );
+}
+
+function showMostRecentConversation() {
+  const recent = conversationThreads.value[0];
+  activeConversationId.value = recent?.id ?? "";
+  messages.value = recent?.messages.length
+    ? recent.messages
+    : [{ id: 1, role: "assistant", text: `${t("greeting")} ${currentProfile.value?.name ?? ""}.`.trim() }];
+  nextMessageId.value = Math.max(1, ...messages.value.map((message) => message.id)) + 1;
+}
+
+function deleteConversation(thread: ConversationThread) {
+  if (!window.confirm(`${dialogLabels[interfaceLanguage.value].deleteDialog}: «${thread.title}»?`)) return;
+  conversationThreads.value = conversationThreads.value.filter((item) => item.id !== thread.id);
+  if (activeConversationId.value === thread.id) showMostRecentConversation();
+  persistConversationThreads();
+}
+
+function clearAllConversations() {
+  if (!conversationThreads.value.length) return;
+  if (!window.confirm(`${dialogLabels[interfaceLanguage.value].clear}?`)) return;
+  conversationThreads.value = [];
+  showMostRecentConversation();
+  persistConversationThreads();
 }
 
 function formatConversationDate(value: string) {
@@ -502,6 +534,9 @@ const synthesisAvailable = ref(false);
 const audioLevel = ref(0);
 const environment = ref<EnvironmentReport | null>(null);
 const conversation = ref<HTMLElement | null>(null);
+watch([chatOpen, conversationListOpen, activeConversationId], ([isOpen, listIsOpen]) => {
+  if (isOpen && !listIsOpen) void scrollChat("auto");
+}, { flush: "post" });
 const lastError = ref<AppError | null>(null);
 const recentLogs = ref<string[]>([]);
 const logPath = ref("");
@@ -1054,9 +1089,9 @@ async function openPermissions() {
   await refreshLogs();
 }
 
-async function scrollChat() {
+async function scrollChat(behavior: ScrollBehavior = "smooth") {
   await nextTick();
-  conversation.value?.scrollTo({ top: conversation.value.scrollHeight, behavior: "smooth" });
+  conversation.value?.scrollTo({ top: conversation.value.scrollHeight, behavior });
 }
 
 function addMessage(role: Message["role"], text: string) {
@@ -1512,9 +1547,15 @@ async function playSystemSpeech(text: string, runId: number) {
     utterance.rate = 0.96;
     utterance.pitch = 0.92;
     const languagePrefix = utterance.lang.toLowerCase().split("-")[0];
-    utterance.voice = window.speechSynthesis.getVoices().find(
+    const matchingVoices = window.speechSynthesis.getVoices().filter(
       (voice) => voice.lang.toLowerCase().startsWith(languagePrefix),
-    ) ?? null;
+    );
+    // Системный список часто начинается с женского голоса. Для образа C-3PO
+    // сначала ищем распространённые мужские голоса macOS и Windows.
+    const preferredMaleNames = /alex|aleks|алекс|yuri|юрий|maxim|максим|pavel|павел|dmitri|дмитрий|mikhail|михаил/i;
+    utterance.voice = matchingVoices.find((voice) => preferredMaleNames.test(voice.name))
+      ?? matchingVoices[0]
+      ?? null;
 
     const finish = (error?: unknown) => {
       if (finished) return;
@@ -1559,7 +1600,10 @@ async function speak(text: string) {
     // Быстрый режим использует уже установленный в ОС движок и поэтому
     // подходит даже слабым компьютерам. В «Авто» личные записанные реплики
     // сохраняются, а произвольный длинный ответ начинается без ожидания ИИ-TTS.
-    if (voiceMode.value !== "personal" && "speechSynthesis" in window) {
+    const personalVoiceReady = Boolean(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound);
+    const useFastSystemVoice = voiceMode.value === "instant"
+      || (voiceMode.value === "adaptive" && !personalVoiceReady);
+    if (useFastSystemVoice && "speechSynthesis" in window) {
       await writeLog("info", "tts.system", "Быстрая озвучка ответа системным голосом", {
         characters: text.length,
         language: commandLanguage.value,
@@ -1567,7 +1611,7 @@ async function speak(text: string) {
       });
       await playSystemSpeech(text.slice(0, 1200), runId);
       selectedVoiceName.value = voiceMode.value === "adaptive"
-        ? "Авто · быстрый голос"
+        ? "Авто · системный голос (личный профиль не установлен)"
         : "Быстрый системный голос";
       if (runId === speechRunId) restoreVoiceState();
       return;
@@ -1879,15 +1923,16 @@ function selectTheme(theme: ThemePreference) {
 function selectVoiceMode(mode: VoiceMode) {
   voiceMode.value = mode;
   window.localStorage.setItem("c3po.voice-mode", mode);
-  selectedVoiceName.value = mode === "personal"
+  const personalVoiceReady = Boolean(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound);
+  selectedVoiceName.value = mode === "personal" || (mode === "adaptive" && personalVoiceReady)
     ? "Локальный голос пользователя"
-    : (mode === "instant" ? "Быстрый системный голос" : "Авто · быстрый голос");
+    : (mode === "instant" ? "Быстрый системный голос" : "Авто · системный голос");
   // Смена режима также должна немедленно остановить предыдущую озвучку.
   speechRunId += 1;
   window.speechSynthesis?.cancel();
   stopGeneratedSpeech?.();
   stopPrivateVoiceSpeech?.();
-  if (mode === "personal") void ensureTtsServer();
+  if (mode === "personal" || (mode === "adaptive" && personalVoiceReady)) void ensureTtsServer();
 }
 
 async function toggleSilentMode() {
@@ -1930,9 +1975,9 @@ onMounted(async () => {
     if (ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound) {
       synthesisAvailable.value = true;
       selectedVoiceName.value = "Локальный голос пользователя";
-      if (voiceMode.value === "personal") {
-        // Тяжёлую модель запускаем только по явному выбору пользователя.
-        // Быстрый и автоматический режимы не расходуют память на Chatterbox.
+      if (voiceMode.value !== "instant") {
+        // В «Авто» установленный личный профиль важнее системного голоса.
+        // Отказаться от тяжёлой модели можно явным выбором «Быстрый».
         void ensureTtsServer();
       }
     }
@@ -1942,10 +1987,10 @@ onMounted(async () => {
     synthesisAvailable.value = true;
     selectedVoiceName.value = "Локальный пакет voice.mp3";
   }
-  if (voiceMode.value !== "personal") {
-    selectedVoiceName.value = voiceMode.value === "instant"
-      ? "Быстрый системный голос"
-      : "Авто · быстрый голос";
+  if (voiceMode.value === "instant") {
+    selectedVoiceName.value = "Быстрый системный голос";
+  } else if (voiceMode.value === "adaptive" && !(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound)) {
+    selectedVoiceName.value = "Авто · системный голос (личный профиль не установлен)";
   }
   await refreshProcessMetrics();
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
@@ -2178,23 +2223,38 @@ onBeforeUnmount(() => {
               <span class="eyebrow">{{ t("history") }}</span>
               <h3>{{ dialogLabels[interfaceLanguage].list }}</h3>
             </div>
-            <button type="button" @click="startNewConversation">＋ {{ dialogLabels[interfaceLanguage].newDialog }}</button>
+            <div class="conversation-browser-actions">
+              <button
+                v-if="conversationThreads.length"
+                class="clear-conversations"
+                type="button"
+                @click="clearAllConversations"
+              >{{ dialogLabels[interfaceLanguage].clear }}</button>
+              <button type="button" @click="startNewConversation">＋ {{ dialogLabels[interfaceLanguage].newDialog }}</button>
+            </div>
           </header>
           <p v-if="!conversationThreads.length" class="conversation-empty">
             {{ dialogLabels[interfaceLanguage].empty }}
           </p>
-          <button
+          <article
             v-for="thread in conversationThreads"
             :key="thread.id"
             class="conversation-item"
             :class="{ active: thread.id === activeConversationId }"
-            type="button"
-            @click="openConversation(thread)"
           >
-            <span>◇</span>
-            <span><strong>{{ thread.title }}</strong><small>{{ formatConversationDate(thread.updatedAt) }}</small></span>
-            <b>→</b>
-          </button>
+            <button class="conversation-open" type="button" @click="openConversation(thread)">
+              <span>◇</span>
+              <span><strong>{{ thread.title }}</strong><small>{{ formatConversationDate(thread.updatedAt) }}</small></span>
+              <b>→</b>
+            </button>
+            <button
+              class="conversation-delete"
+              type="button"
+              :aria-label="dialogLabels[interfaceLanguage].deleteDialog"
+              :title="dialogLabels[interfaceLanguage].deleteDialog"
+              @click="deleteConversation(thread)"
+            >×</button>
+          </article>
         </section>
 
         <div v-else ref="conversation" class="drawer-messages">
@@ -2249,9 +2309,9 @@ onBeforeUnmount(() => {
               <button type="button" :class="{ active: voiceMode === 'personal' }" @click="selectVoiceMode('personal')">♫ <span>{{ voiceModeLabels[interfaceLanguage].personal }}</span></button>
             </div>
             <small class="settings-hint">
-              {{ voiceMode === 'personal'
-                ? 'Точный голос из вашего образца: качественнее, но требует мощного компьютера.'
-                : 'Ответ начинается сразу и не требует загрузки тяжёлой голосовой модели.' }}
+              {{ voiceMode === 'personal' || (voiceMode === 'adaptive' && ttsStatus?.runtimeFound && ttsStatus?.referenceFound)
+                ? 'Используется ваш голосовой образец. На слабом компьютере ответ может готовиться дольше.'
+                : 'Быстрый голос ОС: ответ начинается сразу и не требует тяжёлой модели.' }}
             </small>
           </section>
 

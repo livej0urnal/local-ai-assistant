@@ -1403,6 +1403,12 @@ button:disabled {
   font-size: 16px;
 }
 
+.conversation-browser-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .conversation-browser > header button {
   min-height: 34px;
   padding: 0 10px;
@@ -1414,6 +1420,12 @@ button:disabled {
   font-weight: 750;
 }
 
+.conversation-browser > header .clear-conversations {
+  border-color: color-mix(in srgb, #c65a4b 42%, var(--line));
+  color: color-mix(in srgb, #d56b5d 75%, var(--ink));
+  background: color-mix(in srgb, #c65a4b 9%, var(--surface));
+}
+
 .conversation-empty {
   margin: 36px 0;
   color: var(--muted);
@@ -1423,17 +1435,15 @@ button:disabled {
 
 .conversation-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
   width: 100%;
   margin-bottom: 8px;
-  padding: 11px;
   border: 1px solid var(--line);
   border-radius: 12px;
   color: var(--ink);
   background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
-  text-align: left;
+  overflow: hidden;
 }
 
 .conversation-item.active {
@@ -1441,30 +1451,58 @@ button:disabled {
   background: color-mix(in srgb, var(--gold-soft) 55%, var(--surface-raised));
 }
 
-.conversation-item > span:first-child {
+.conversation-open {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+
+.conversation-open > span:first-child {
   color: var(--gold);
 }
 
-.conversation-item strong,
-.conversation-item small {
+.conversation-open strong,
+.conversation-open small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.conversation-item strong {
+.conversation-open strong {
   font-size: 11px;
 }
 
-.conversation-item small {
+.conversation-open small {
   margin-top: 3px;
   color: var(--muted);
   font-size: 8px;
 }
 
-.conversation-item b {
+.conversation-open b {
   color: var(--muted);
+}
+
+.conversation-delete {
+  align-self: stretch;
+  width: 38px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  background: transparent;
+  font-size: 15px;
+}
+
+.conversation-delete:hover {
+  color: #d56b5d;
+  background: color-mix(in srgb, #c65a4b 10%, transparent);
 }
 
 .drawer-message {

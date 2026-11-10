@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">C-3PO</title>
+  <defs>
+    <linearGradient id="gold" x1="128" y1="80" x2="896" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f8dc91"/>
+      <stop offset="0.48" stop-color="#d9a83f"/>
+      <stop offset="1" stop-color="#a76d14"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="206" y1="134" x2="818" y2="890" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff1bd"/>
+      <stop offset="0.5" stop-color="#e8bd5d"/>
+      <stop offset="1" stop-color="#75470d"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="34" stdDeviation="34" flood-color="#000" flood-opacity=".34"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="#181914"/>
+  <g filter="url(#shadow)">
+    <rect x="104" y="104" width="816" height="816" rx="204" fill="url(#gold)" stroke="url(#rim)" stroke-width="22"/>
+    <path d="M751 374c-46-57-113-88-190-88-137 0-232 96-232 228s95 228 232 228c78 0 147-32 192-91l-94-70c-24 30-55 46-94 46-65 0-108-46-108-113 0-68 43-113 108-113 38 0 69 15 93 44l93-71Z" fill="#1b1c17"/>
+    <path d="M174 260c69-96 167-136 292-139" fill="none" stroke="#fff4c8" stroke-width="18" stroke-linecap="round" opacity=".48"/>
+  </g>
+</svg>

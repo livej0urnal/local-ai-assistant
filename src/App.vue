@@ -3,11 +3,18 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import droidPortrait from "./assets/protocol-droid.png";
 import { assistantPhrase, moviePhrase, voiceDemoPhrases } from "./assistantPhrases";
+import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
 
 type Message = {
   id: number;
   role: "assistant" | "user";
   text: string;
+};
+
+type UserProfile = {
+  id: string;
+  name: string;
+  createdAt: string;
 };
 
 type SystemInfo = {
@@ -104,11 +111,39 @@ type RecognitionLike = {
 
 type RecognitionConstructor = new () => RecognitionLike;
 
+const storedInterfaceLanguage = window.localStorage.getItem("c3po.interface-language");
+const storedCommandLanguage = window.localStorage.getItem("c3po.command-language");
+const interfaceLanguage = ref<LanguageCode>(isLanguageCode(storedInterfaceLanguage) ? storedInterfaceLanguage : "ru");
+const commandLanguage = ref<LanguageCode>(isLanguageCode(storedCommandLanguage) ? storedCommandLanguage : "ru");
+
+function readProfiles(): UserProfile[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem("c3po.user-profiles") ?? "[]");
+    return Array.isArray(value) ? value.filter((item) => item?.id && item?.name) : [];
+  } catch {
+    return [];
+  }
+}
+
+const profiles = ref<UserProfile[]>(readProfiles());
+const storedProfileId = window.localStorage.getItem("c3po.current-profile");
+const initialProfile = profiles.value.find((profile) => profile.id === storedProfileId) ?? profiles.value[0] ?? null;
+const currentProfileId = ref(initialProfile?.id ?? "");
+const awaitingIntroduction = ref(!initialProfile);
+
+function t(key: keyof (typeof translations)["ru"]) {
+  return translations[interfaceLanguage.value][key];
+}
+
+function commandText(key: keyof (typeof translations)["ru"]) {
+  return translations[commandLanguage.value][key];
+}
+
 const messages = ref<Message[]>([
   {
     id: 1,
     role: "assistant",
-    text: `${moviePhrase("identity")} Скажите: «Покажи информацию о системе».`,
+    text: initialProfile ? `${t("greeting")} ${initialProfile.name}.` : introductionPrompt(commandLanguage.value),
   },
 ]);
 const nextMessageId = ref(2);
@@ -120,6 +155,7 @@ const isWorking = ref(false);
 const chatOpen = ref(false);
 const permissionsOpen = ref(false);
 const llmOpen = ref(false);
+const languageOpen = ref(false);
 const onboardingOpen = ref(false);
 const voiceState = ref<VoiceState>("idle");
 const microphonePermission = ref<PermissionState>("checking");
@@ -138,7 +174,7 @@ const logsExpanded = ref(false);
 const processMetrics = ref<ProcessMetrics | null>(null);
 const memoryBaselineBytes = ref(0);
 const memoryPeakBytes = ref(0);
-const selectedVoiceName = ref("Системный русский голос");
+const selectedVoiceName = ref("System voice");
 const recognitionBlockedReason = ref("");
 const llmStatus = ref<LlmStatus | null>(null);
 const llmLoading = ref(false);
@@ -169,23 +205,27 @@ function rememberMicrophonePermission(state: PermissionState) {
 }
 
 const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
+const currentProfile = computed(() => profiles.value.find((profile) => profile.id === currentProfileId.value) ?? null);
+const selectedCommandLanguage = computed(
+  () => languages.find((language) => language.code === commandLanguage.value) ?? languages[0],
+);
 const systemLabel = computed(() => {
   if (!environment.value) return "Определяю систему…";
   return `${environment.value.system.operatingSystem} ${environment.value.system.osVersion}`;
 });
 const voiceStatus = computed(() => {
   if (voiceState.value === "idle" && microphoneActive.value && !recognitionAvailable.value) {
-    return "Микрофон включён";
+    return t("idle");
   }
-  const labels: Record<VoiceState, string> = {
-    idle: "Готов к голосовой команде",
-    listening: "Слушаю вас",
-    thinking: "Обрабатываю команду",
-    speaking: "Отвечаю голосом",
-    paused: "Микрофон на паузе",
-    error: "Голосовой режим недоступен",
+  const labels: Record<VoiceState, keyof (typeof translations)["ru"]> = {
+    idle: "idle",
+    listening: "listening",
+    thinking: "thinking",
+    speaking: "speaking",
+    paused: "paused",
+    error: "error",
   };
-  return labels[voiceState.value];
+  return t(labels[voiceState.value]);
 });
 const microphoneLabel = computed(() => {
   const labels: Record<PermissionState, string> = {
@@ -331,13 +371,16 @@ async function playR2D2Signal(mood: R2D2Mood) {
 async function askLocalModel(prompt: string, showInConversation = true) {
   isWorking.value = true;
   voiceState.value = "thinking";
-  lastCommand.value = "Минутку, я советуюсь с R2-D2…";
+  lastCommand.value = t("consultingR2");
   try {
     await playR2D2Signal("thinking");
     if (!llmRuntime.value?.ready && !(await startLocalModel())) {
       throw new Error("Локальная модель не запустилась");
     }
-    const reply = await invoke<LocalReply>("generate_local_reply", { prompt });
+    const reply = await invoke<LocalReply>("generate_local_reply", {
+      prompt,
+      language: selectedCommandLanguage.value.modelName,
+    });
     llmTestReply.value = reply.text;
     lastCommand.value = reply.text;
     await playR2D2Signal("success");
@@ -531,7 +574,7 @@ function configureRecognition() {
   if (!Recognition) return;
 
   recognition = new Recognition();
-  recognition.lang = "ru-RU";
+  recognition.lang = selectedCommandLanguage.value.speechCode;
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.onstart = () => {
@@ -744,13 +787,13 @@ function speak(text: string) {
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   const voices = window.speechSynthesis.getVoices();
-  // На macOS обычно доступны Юрий и Milena. Выбираем русский голос,
-  // но не пытаемся имитировать конкретного живого актёра.
-  const russianVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith("ru"));
-  utterance.voice =
-    russianVoices.find((voice) => /yuri|юрий/i.test(voice.name)) ?? russianVoices[0] ?? null;
-  selectedVoiceName.value = utterance.voice?.name ?? "Системный русский голос";
-  utterance.lang = "ru-RU";
+  // Голос выбирается по языку команд. Пользователь всегда может изменить
+  // системный голос в настройках macOS или Windows.
+  const voicePrefix = selectedCommandLanguage.value.speechCode.slice(0, 2).toLowerCase();
+  const matchingVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith(voicePrefix));
+  utterance.voice = matchingVoices[0] ?? null;
+  selectedVoiceName.value = utterance.voice?.name ?? selectedCommandLanguage.value.nativeName;
+  utterance.lang = selectedCommandLanguage.value.speechCode;
   utterance.rate = 0.9;
   utterance.pitch = 1.08;
   utterance.volume = 0.92;
@@ -765,7 +808,9 @@ function speak(text: string) {
 }
 
 function testVoice() {
-  const phrase = voiceDemoPhrases[voiceDemoIndex % voiceDemoPhrases.length];
+  const phrase = commandLanguage.value === "ru"
+    ? voiceDemoPhrases[voiceDemoIndex % voiceDemoPhrases.length]
+    : commandText("greeting");
   voiceDemoIndex += 1;
   lastCommand.value = phrase;
   addMessage("assistant", phrase);
@@ -819,6 +864,8 @@ async function approveAction() {
 
 function processVoiceCommand(text: string) {
   const normalized = text.toLowerCase();
+  const localizedSystemCommand = commandText("systemCommand").toLowerCase();
+  const localizedChatCommand = commandText("chatCommand").toLowerCase();
   lastCommand.value = text;
   liveTranscript.value = "";
   addMessage("user", text);
@@ -831,11 +878,11 @@ function processVoiceCommand(text: string) {
     cancelAction();
     return;
   }
-  if (/(систем|компьютер|операцион|памят|процессор)/.test(normalized)) {
+  if (normalized.includes(localizedSystemCommand) || /(систем|компьютер|операцион|памят|процессор)/.test(normalized)) {
     proposeSystemInfo();
     return;
   }
-  if (/(открой|покажи).*(чат|диалог)/.test(normalized)) {
+  if (normalized.includes(localizedChatCommand) || /(открой|покажи).*(чат|диалог)/.test(normalized)) {
     chatOpen.value = true;
     const response = assistantPhrase("chatOpened");
     addMessage("assistant", response);
@@ -884,7 +931,28 @@ function permissionStatusLabel(id: string) {
   return labels[permissionStatus(id) as PermissionState] ?? "неизвестно";
 }
 
+function saveInterfaceLanguage() {
+  window.localStorage.setItem("c3po.interface-language", interfaceLanguage.value);
+  document.documentElement.lang = interfaceLanguage.value;
+  document.documentElement.dir = interfaceLanguage.value === "ar" ? "rtl" : "ltr";
+  if (messages.value.length === 1) messages.value[0].text = t("greeting");
+  if (!liveTranscript.value) lastCommand.value = t("sayCommand");
+}
+
+function saveCommandLanguage() {
+  window.localStorage.setItem("c3po.command-language", commandLanguage.value);
+  const resumeListening = shouldListen;
+  if (recognition) {
+    stopRecognition(resumeListening ? "idle" : "paused");
+    recognition.lang = selectedCommandLanguage.value.speechCode;
+    if (resumeListening) window.setTimeout(startRecognition, 200);
+  }
+  selectedVoiceName.value = selectedCommandLanguage.value.nativeName;
+}
+
 onMounted(async () => {
+  saveInterfaceLanguage();
+  saveCommandLanguage();
   await loadEnvironment();
   await loadLlmStatus();
   configureRecognition();
@@ -911,7 +979,7 @@ onBeforeUnmount(() => {
         <div class="brand-symbol">C</div>
         <div>
           <strong>C-3PO</strong>
-          <span>Локальный помощник</span>
+          <span>{{ t("localAssistant") }}</span>
         </div>
       </div>
 
@@ -931,13 +999,17 @@ onBeforeUnmount(() => {
           <span>{{ llmShortLabel }}</span>
           <i :class="llmStatus?.state === 'ready' ? 'granted' : 'prompt'"></i>
         </button>
+        <button class="ghost-button language-button" type="button" @click="languageOpen = true">
+          <span class="button-icon">文</span>
+          <span>{{ interfaceLanguage.toUpperCase() }} · {{ commandLanguage.toUpperCase() }}</span>
+        </button>
         <button class="ghost-button" type="button" @click="openPermissions">
           <span class="button-icon">⌾</span>
-          Доступы
+          <span>{{ t("permissions") }}</span>
           <i :class="microphonePermission"></i>
         </button>
         <button class="chat-button" type="button" @click="chatOpen = true">
-          <span>Открыть диалог</span>
+          <span>{{ t("openChat") }}</span>
           <b>{{ Math.max(0, messages.length - 1) }}</b>
         </button>
       </div>
@@ -957,7 +1029,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="voice-copy">
-          <span class="eyebrow">ГОЛОСОВОЙ РЕЖИМ</span>
+          <span class="eyebrow">{{ t("voiceMode") }}</span>
           <h1>{{ voiceStatus }}</h1>
           <p class="transcript">{{ liveTranscript || lastCommand }}</p>
 
@@ -968,7 +1040,7 @@ onBeforeUnmount(() => {
             @click="toggleMicrophone"
           >
             <span class="microphone-icon"></span>
-            <span>{{ canPauseMicrophone ? "Поставить на паузу" : "Включить микрофон" }}</span>
+            <span>{{ canPauseMicrophone ? t("pauseMicrophone") : t("enableMicrophone") }}</span>
           </button>
 
           <p v-if="microphonePermission === 'granted' && !recognitionAvailable" class="voice-warning">
@@ -989,34 +1061,34 @@ onBeforeUnmount(() => {
       <section class="quick-panel">
         <div class="section-heading">
           <div>
-            <span class="eyebrow">БЫСТРЫЙ СТАРТ</span>
-            <h2>Что можно сказать</h2>
+            <span class="eyebrow">{{ t("quickStart") }}</span>
+            <h2>{{ t("whatCanSay") }}</h2>
           </div>
-          <span class="privacy-badge">Без передачи файлов</span>
+          <span class="privacy-badge">{{ t("localOnly") }}</span>
         </div>
 
         <div class="command-grid">
-          <button type="button" @click="processVoiceCommand('Покажи информацию о системе')">
+          <button type="button" @click="proposeSystemInfo">
             <span class="command-icon">⌘</span>
             <span>
-              <strong>«Покажи информацию о системе»</strong>
-              <small>ОС, архитектура и оперативная память</small>
+              <strong>«{{ t("systemCommand") }}»</strong>
+              <small>{{ t("systemDescription") }}</small>
             </span>
             <b>→</b>
           </button>
           <button type="button" @click="chatOpen = true">
             <span class="command-icon">◇</span>
             <span>
-              <strong>«Открой диалог»</strong>
-              <small>Показать текстовую историю справа</small>
+              <strong>«{{ t("chatCommand") }}»</strong>
+              <small>{{ t("chatDescription") }}</small>
             </span>
             <b>→</b>
           </button>
           <button type="button" @click="testVoice">
             <span class="command-icon">♫</span>
             <span>
-              <strong>Проверить голос</strong>
-              <small>{{ selectedVoiceName }} · каждое нажатие — новая ситуация</small>
+              <strong>{{ t("testVoice") }}</strong>
+              <small>{{ selectedVoiceName }} · {{ t("voiceDescription") }}</small>
             </span>
             <b>▶</b>
           </button>
@@ -1043,10 +1115,10 @@ onBeforeUnmount(() => {
       <aside class="chat-drawer" aria-label="Текстовый диалог">
         <header>
           <div>
-            <span class="eyebrow">ИСТОРИЯ</span>
-            <h2>Диалог с C-3PO</h2>
+            <span class="eyebrow">{{ t("history") }}</span>
+            <h2>{{ t("dialogTitle") }}</h2>
           </div>
-          <button type="button" aria-label="Закрыть диалог" @click="chatOpen = false">×</button>
+          <button type="button" :aria-label="t('close')" @click="chatOpen = false">×</button>
         </header>
 
         <div ref="conversation" class="drawer-messages">
@@ -1060,13 +1132,49 @@ onBeforeUnmount(() => {
           <textarea
             v-model="input"
             rows="2"
-            placeholder="Введите команду…"
+            :placeholder="t('enterCommand')"
             aria-label="Текстовая команда"
             @keydown.enter.exact.prevent="submitMessage"
           ></textarea>
           <button type="submit" :disabled="!canSend">↑</button>
         </form>
       </aside>
+    </div>
+
+    <div v-if="languageOpen" class="modal-backdrop" @click.self="languageOpen = false">
+      <section class="permission-modal language-modal" :aria-label="t('languageSettings')">
+        <header>
+          <div>
+            <span class="eyebrow">{{ t("language") }}</span>
+            <h2>{{ t("languageSettings") }}</h2>
+          </div>
+          <button type="button" :aria-label="t('close')" @click="languageOpen = false">×</button>
+        </header>
+
+        <div class="language-fields">
+          <label>
+            <span>{{ t("interfaceLanguage") }}</span>
+            <select v-model="interfaceLanguage" @change="saveInterfaceLanguage">
+              <option v-for="language in languages" :key="language.code" :value="language.code">
+                {{ language.nativeName }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>{{ t("commandLanguage") }}</span>
+            <select v-model="commandLanguage" @change="saveCommandLanguage">
+              <option v-for="language in languages" :key="language.code" :value="language.code">
+                {{ language.nativeName }}
+              </option>
+            </select>
+          </label>
+        </div>
+
+        <p class="permission-note">{{ t("languageHint") }}</p>
+        <div class="language-actions">
+          <button class="approve-button" type="button" @click="languageOpen = false">{{ t("done") }}</button>
+        </div>
+      </section>
     </div>
 
     <div v-if="permissionsOpen" class="modal-backdrop" @click.self="permissionsOpen = false">

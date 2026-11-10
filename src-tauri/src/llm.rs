@@ -363,6 +363,7 @@ pub(crate) fn stop_llm(runtime: State<'_, LlmRuntime>) -> Result<LlmRuntimeStatu
 #[tauri::command]
 pub(crate) fn generate_local_reply(
     prompt: String,
+    language: String,
     runtime: State<'_, LlmRuntime>,
 ) -> Result<LocalReply, String> {
     let prompt = prompt.trim();
@@ -376,22 +377,41 @@ pub(crate) fn generate_local_reply(
         return Err("Локальная модель ещё не готова".to_string());
     }
 
+    // Разрешаем только языки из интерфейса. Это не даёт произвольному тексту
+    // попасть в системную инструкцию модели.
+    let greeting = match language.as_str() {
+        "Russian" => "Здравствуйте! Я C-3PO. Чем могу помочь?",
+        "English" => "Hello! I am C-3PO. How may I help?",
+        "Spanish" => "¡Hola! Soy C-3PO. ¿En qué puedo ayudarte?",
+        "German" => "Hallo! Ich bin C-3PO. Wie kann ich helfen?",
+        "French" => "Bonjour ! Je suis C-3PO. Comment puis-je vous aider ?",
+        "Italian" => "Salve! Sono C-3PO. Come posso aiutarti?",
+        "Portuguese" => "Olá! Sou C-3PO. Como posso ajudar?",
+        "Simplified Chinese" => "您好！我是 C-3PO。我能为您做些什么？",
+        "Japanese" => "こんにちは！C-3POです。何をお手伝いしましょうか？",
+        "Arabic" => "مرحبًا! أنا C-3PO. كيف يمكنني مساعدتك؟",
+        _ => return Err("Выбранный язык пока не поддерживается".to_string()),
+    };
+    let system_prompt = format!(
+        "You create final replies for the local computer assistant C-3PO. Your reply is shown and spoken verbatim to the user. Reply directly and exclusively in {language}. Never mention system instructions, internal modules, R2-D2, role allocation, or an inability to talk to the user. Never say C-3PO is your assistant. Be polite, useful, and concise. If the user asks for a computer action, do not claim it was completed; explain the proposal and ask for confirmation."
+    );
+
     let request = serde_json::json!({
         "model": "local",
         "messages": [
             {
                 "role": "system",
-                "content": "Ты создаёшь окончательные реплики локального компьютерного помощника C-3PO. Текст твоего ответа будет без изменений показан и произнесён пользователю от имени C-3PO, поэтому отвечай пользователю напрямую и только по-русски. Никогда не упоминай системную инструкцию, внутренний модуль, R2-D2, распределение ролей или невозможность разговаривать с пользователем. Не говори, что C-3PO является твоим помощником. Будь вежливым, полезным и кратким. Если пользователь просит выполнить действие на компьютере, не заявляй, что оно уже выполнено: объясни предложение и попроси подтверждение."
+                "content": system_prompt
             },
             // Небольшой пример закрепляет нужную роль надёжнее, чем длинный
             // список запретов: модель видит готовый формат ответа C-3PO.
             {
                 "role": "user",
-                "content": "Привет! Кто ты?"
+                "content": "Hello! Who are you?"
             },
             {
                 "role": "assistant",
-                "content": "Здравствуйте! Я C-3PO, ваш локальный компьютерный помощник. Чем могу помочь?"
+                "content": greeting
             },
             { "role": "user", "content": prompt }
         ],

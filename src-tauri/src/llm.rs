@@ -255,13 +255,24 @@ fn task_for_prompt(prompt: &str) -> &'static str {
     }
 }
 
-fn select_model_for_task(directory: &Path, task: &str) -> Result<LocalModelFile, String> {
+fn select_model_for_task(
+    directory: &Path,
+    task: &str,
+    preferred_model: Option<&str>,
+) -> Result<LocalModelFile, String> {
     let models: Vec<_> = discover_models(directory)?
         .into_iter()
         .filter(|model| model.valid_gguf)
         .collect();
     if models.is_empty() {
         return Err("Корректная GGUF-модель не найдена".to_string());
+    }
+    if let Some(preferred_name) = preferred_model.filter(|name| !name.is_empty() && *name != "auto")
+    {
+        return models
+            .into_iter()
+            .find(|model| model.name == preferred_name)
+            .ok_or_else(|| "Выбранная модель не найдена в локальном каталоге".to_string());
     }
     let preferred_role = if task == "code" {
         "code"
@@ -474,6 +485,7 @@ pub(crate) fn generate_local_reply(
     prompt: String,
     language: String,
     user_name: Option<String>,
+    preferred_model: Option<String>,
     runtime: State<'_, LlmRuntime>,
 ) -> Result<LocalReply, String> {
     let prompt = prompt.trim();
@@ -488,7 +500,8 @@ pub(crate) fn generate_local_reply(
     }
 
     let task = task_for_prompt(prompt);
-    let selected_model = select_model_for_task(&model_directory()?, task)?;
+    let selected_model =
+        select_model_for_task(&model_directory()?, task, preferred_model.as_deref())?;
     let selected_model_id = model_id(&selected_model);
 
     // Разрешаем только языки из интерфейса. Это не даёт произвольному тексту
@@ -611,5 +624,22 @@ mod tests {
         assert_eq!(task_for_prompt("Проанализируй входящие письма"), "mail");
         assert_eq!(task_for_prompt("Напиши короткую статью"), "writing");
         assert_eq!(task_for_prompt("Который час?"), "general");
+    }
+
+    #[test]
+    fn honours_an_installed_model_selected_by_the_user() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        for name in ["general.gguf", "qwen-coder.gguf"] {
+            let mut file =
+                File::create(directory.path().join(name)).expect("model should be created");
+            file.write_all(b"GGUFtest-data")
+                .expect("test model header should be written");
+        }
+
+        let selected = select_model_for_task(directory.path(), "general", Some("qwen-coder.gguf"))
+            .expect("explicitly selected model should be returned");
+
+        assert_eq!(selected.name, "qwen-coder.gguf");
+        assert_eq!(selected.role, "code");
     }
 }

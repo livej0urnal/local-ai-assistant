@@ -1815,6 +1815,104 @@ button:disabled {
   line-height: 1.5;
 }
 
+.droid-model-selector {
+  display: grid;
+  gap: 8px;
+  margin: 0 24px 16px;
+}
+
+.droid-model-card {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 72px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--ink);
+  background: var(--surface-raised);
+  text-align: left;
+  transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
+}
+
+.droid-model-card:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--gold) 55%, var(--line));
+  transform: translateY(-1px);
+}
+
+.droid-model-card.active {
+  border-color: var(--gold);
+  background: color-mix(in srgb, var(--gold-soft) 52%, var(--surface-raised));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--gold) 20%, transparent);
+}
+
+.droid-model-card.unavailable {
+  opacity: 0.58;
+}
+
+.droid-model-avatar {
+  display: grid;
+  place-items: center;
+  min-height: 44px;
+  border-radius: 12px;
+  color: #f2cf73;
+  background: linear-gradient(145deg, #20343a, #101b20);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.droid-model-card.auto .droid-model-avatar {
+  color: var(--gold-dark);
+  background: var(--gold-soft);
+}
+
+.droid-model-card strong,
+.droid-model-card small,
+.droid-model-card em {
+  display: block;
+}
+
+.droid-model-card strong {
+  font-size: 12px;
+}
+
+.droid-model-card small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.droid-model-card em {
+  margin-top: 4px;
+  color: var(--gold-dark);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.droid-model-card > b {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: #706d65;
+  background: #ecebe6;
+  font-size: 8px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.droid-model-card > b.ready,
+.droid-model-card.active > b {
+  color: #3f7549;
+  background: #e7f3e7;
+}
+
+.droid-model-card > b.missing {
+  color: #856221;
+  background: #f7edda;
+}
+
 .model-checklist {
   margin: 0 24px;
   overflow: hidden;
@@ -2238,10 +2336,20 @@ button:disabled {
   }
 
   .model-state,
+  .droid-model-selector,
   .model-checklist,
   .model-path {
     margin-right: 16px;
     margin-left: 16px;
+  }
+
+  .droid-model-card {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .droid-model-card > b {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .model-checklist article {

@@ -49,6 +49,15 @@ type LocalModelFile = {
   path: string;
   sizeBytes: number;
   validGguf: boolean;
+  role: "general" | "code" | "writing-mail";
+};
+
+type DroidModelProfile = {
+  role: LocalModelFile["role"];
+  droid: "R2-D2" | "BB-8" | "K-2SO";
+  purpose: string;
+  recommendedModel: string;
+  model: LocalModelFile | null;
 };
 
 type LlmStatus = {
@@ -468,6 +477,7 @@ const llmStatus = ref<LlmStatus | null>(null);
 const llmLoading = ref(false);
 const llmRuntime = ref<LlmRuntimeStatus | null>(null);
 const llmTestReply = ref("");
+const modelPreference = ref(window.localStorage.getItem("c3po.model-preference") || "auto");
 const privateVoiceCatalog = ref<PrivateVoiceCatalog | null>(null);
 
 let recognition: RecognitionLike | null = null;
@@ -567,9 +577,27 @@ const llmShortLabel = computed(() => {
     "engine-missing": "Нужен llama.cpp",
     "model-missing": "Нужна GGUF-модель",
     "model-invalid": "Ошибка модели",
-    ready: "R2-D2 готов",
+    ready: modelPreference.value === "auto" ? "Дроиды готовы" : `${selectedDroidName.value} готов`,
   };
   return labels[llmStatus.value.state];
+});
+const droidModelDefinitions: Array<Omit<DroidModelProfile, "model">> = [
+  { role: "general", droid: "R2-D2", purpose: "Общие вопросы и быстрые команды", recommendedModel: "Qwen2.5 1.5B" },
+  { role: "code", droid: "BB-8", purpose: "Программирование и разбор ошибок", recommendedModel: "Qwen2.5 Coder 3B" },
+  { role: "writing-mail", droid: "K-2SO", purpose: "Тексты, документы и анализ почты", recommendedModel: "Qwen3 4B" },
+];
+const droidModelFleet = computed<DroidModelProfile[]>(() => {
+  const installed = llmStatus.value?.models ?? (llmStatus.value?.selectedModel ? [llmStatus.value.selectedModel] : []);
+  return droidModelDefinitions.map((definition) => ({
+    ...definition,
+    model: installed
+      .filter((model) => model.role === definition.role && model.validGguf)
+      .sort((left, right) => right.sizeBytes - left.sizeBytes)[0] ?? null,
+  }));
+});
+const selectedDroidName = computed(() => {
+  if (modelPreference.value === "auto") return "Автовыбор";
+  return droidModelFleet.value.find((profile) => profile.model?.name === modelPreference.value)?.droid ?? "Автовыбор";
 });
 
 function formatBytes(bytes: number) {
@@ -709,6 +737,7 @@ async function loadLlmStatus() {
       enginePath: "Браузерный предпросмотр",
       modelDirectory: "Доступно только в приложении Tauri",
       selectedModel: null,
+      models: [],
       discoveredModels: 0,
       message: "В браузерном режиме показано демонстрационное состояние локальной модели.",
     };
@@ -718,6 +747,11 @@ async function loadLlmStatus() {
   llmLoading.value = true;
   try {
     llmStatus.value = await invoke<LlmStatus>("get_llm_status");
+    const installedNames = (llmStatus.value.models ?? []).map((model) => model.name);
+    if (modelPreference.value !== "auto" && !installedNames.includes(modelPreference.value)) {
+      modelPreference.value = "auto";
+      window.localStorage.setItem("c3po.model-preference", "auto");
+    }
     llmRuntime.value = await invoke<LlmRuntimeStatus>("get_llm_runtime_status");
   } catch (error) {
     const details = errorDetails(error);
@@ -807,7 +841,8 @@ async function askLocalModel(prompt: string, showInConversation = true) {
   isWorking.value = true;
   isConsultingR2.value = true;
   voiceState.value = "thinking";
-  lastCommand.value = t("consultingR2");
+  const activeDroid = selectedDroidName.value === "Автовыбор" ? "R2-D2" : selectedDroidName.value;
+  lastCommand.value = `Минутку, я советуюсь с ${activeDroid}…`;
   try {
     // Даём Vue отрисовать R2-D2 до запуска тяжёлого локального запроса.
     await nextTick();
@@ -819,6 +854,7 @@ async function askLocalModel(prompt: string, showInConversation = true) {
       prompt,
       language: selectedCommandLanguage.value.modelName,
       userName: currentProfile.value?.name ?? null,
+      preferredModel: modelPreference.value === "auto" ? null : modelPreference.value,
     });
     llmTestReply.value = reply.text;
     lastCommand.value = reply.text;
@@ -845,6 +881,11 @@ async function askLocalModel(prompt: string, showInConversation = true) {
       voiceState.value = microphoneActive.value ? "listening" : "idle";
     }
   }
+}
+
+function selectDroidModel(modelName: string) {
+  modelPreference.value = modelName;
+  window.localStorage.setItem("c3po.model-preference", modelName);
 }
 
 async function testLocalModel() {
@@ -1576,8 +1617,8 @@ onBeforeUnmount(() => {
             <div class="r2-beam"></div>
           </div>
           <div class="r2-consultation-copy">
-            <span>R2-D2 · LOCAL CORE</span>
-            <strong>{{ t("consultingR2") }}</strong>
+            <span>{{ selectedDroidName === "Автовыбор" ? "DROID AUTO" : selectedDroidName }} · LOCAL CORE</span>
+            <strong>{{ lastCommand }}</strong>
             <div class="r2-data-line"><i v-for="index in 12" :key="index"></i></div>
           </div>
         </div>
@@ -1932,7 +1973,7 @@ onBeforeUnmount(() => {
         <header>
           <div>
             <span class="eyebrow">ЛОКАЛЬНЫЙ ИНТЕЛЛЕКТ</span>
-            <h2>R2-D2 — локальная модель</h2>
+            <h2>Локальные модели-дроиды</h2>
           </div>
           <button type="button" aria-label="Закрыть" @click="llmOpen = false">×</button>
         </header>
@@ -1944,6 +1985,38 @@ onBeforeUnmount(() => {
             <p>{{ llmStatus?.message || "Проверяю локальное окружение…" }}</p>
           </div>
         </div>
+
+        <section class="droid-model-selector" aria-label="Выбор локальной модели">
+          <button
+            class="droid-model-card auto"
+            type="button"
+            :class="{ active: modelPreference === 'auto' }"
+            @click="selectDroidModel('auto')"
+          >
+            <span class="droid-model-avatar">AUTO</span>
+            <span><strong>Автовыбор</strong><small>C-3PO выберет модель по задаче</small></span>
+            <b>{{ modelPreference === "auto" ? "выбрано" : "выбрать" }}</b>
+          </button>
+          <button
+            v-for="profile in droidModelFleet"
+            :key="profile.droid"
+            class="droid-model-card"
+            type="button"
+            :class="{ active: profile.model?.name === modelPreference, unavailable: !profile.model }"
+            :disabled="!profile.model"
+            @click="profile.model && selectDroidModel(profile.model.name)"
+          >
+            <span class="droid-model-avatar">{{ profile.droid }}</span>
+            <span>
+              <strong>{{ profile.droid }}</strong>
+              <small>{{ profile.purpose }}</small>
+              <em>{{ profile.model ? `${profile.recommendedModel} · ${formatBytes(profile.model.sizeBytes)}` : `${profile.recommendedModel} · не установлена` }}</em>
+            </span>
+            <b :class="profile.model ? 'ready' : 'missing'">
+              {{ profile.model?.name === modelPreference ? "выбрано" : (profile.model ? "готов" : "нет файла") }}
+            </b>
+          </button>
+        </section>
 
         <div class="model-checklist">
           <article>
@@ -1959,14 +2032,14 @@ onBeforeUnmount(() => {
           <article>
             <span>2</span>
             <div>
-              <strong>Модель GGUF</strong>
-              <small v-if="llmStatus?.selectedModel">
-                {{ llmStatus.selectedModel.name }} · {{ formatBytes(llmStatus.selectedModel.sizeBytes) }}
+              <strong>Модели GGUF</strong>
+              <small v-if="llmStatus?.models?.length">
+                Установлено: {{ llmStatus.models.filter((model) => model.validGguf).length }} · выбран: {{ selectedDroidName }}
               </small>
               <small v-else>Пока не установлена</small>
             </div>
             <b :class="llmStatus?.selectedModel ? 'ready' : 'missing'">
-              {{ llmStatus?.selectedModel ? "готова" : "нужна" }}
+              {{ llmStatus?.selectedModel ? "готовы" : "нужны" }}
             </b>
           </article>
           <article>

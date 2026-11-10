@@ -354,7 +354,8 @@ pub(crate) fn get_automation_permissions() -> AutomationPermissions {
             message: if accessibility {
                 "Управление интерфейсом разрешено.".to_string()
             } else {
-                "Для клавиатуры и кнопок разрешите C-3PO в разделе «Универсальный доступ».".to_string()
+                "Для клавиатуры и кнопок разрешите C-3PO в разделе «Универсальный доступ»."
+                    .to_string()
             },
         };
     }
@@ -364,7 +365,8 @@ pub(crate) fn get_automation_permissions() -> AutomationPermissions {
             platform: "windows".to_string(),
             accessibility: true,
             screen_recording: true,
-            message: "Доступность действий проверяется при выполнении через Windows UI Automation.".to_string(),
+            message: "Доступность действий проверяется при выполнении через Windows UI Automation."
+                .to_string(),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -383,15 +385,22 @@ pub(crate) fn open_automation_settings(kind: String) -> Result<ActionResult, Str
     #[cfg(target_os = "macos")]
     {
         let url = match kind.as_str() {
-            "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-            "screen-recording" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "accessibility" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
+            "screen-recording" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
             _ => return Err("Неизвестный раздел системных разрешений".to_string()),
         };
         Command::new("/usr/bin/open")
             .arg(url)
             .spawn()
             .map_err(|error| format!("Не удалось открыть системные настройки: {error}"))?;
-        return Ok(ActionResult { success: true, message: "Открыт системный раздел разрешений.".to_string() });
+        return Ok(ActionResult {
+            success: true,
+            message: "Открыт системный раздел разрешений.".to_string(),
+        });
     }
     #[cfg(target_os = "windows")]
     {
@@ -400,7 +409,10 @@ pub(crate) fn open_automation_settings(kind: String) -> Result<ActionResult, Str
             .arg("ms-settings:privacy")
             .spawn()
             .map_err(|error| format!("Не удалось открыть параметры Windows: {error}"))?;
-        Ok(ActionResult { success: true, message: "Открыты параметры конфиденциальности Windows.".to_string() })
+        Ok(ActionResult {
+            success: true,
+            message: "Открыты параметры конфиденциальности Windows.".to_string(),
+        })
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -416,7 +428,9 @@ fn validate_automation_text(application: &str, text: &str) -> Result<(String, St
         return Err("Некорректное название приложения".to_string());
     }
     if text.is_empty() || text.chars().count() > 4_000 || text.chars().any(char::is_control) {
-        return Err("Текст должен содержать от 1 до 4000 символов без управляющих символов".to_string());
+        return Err(
+            "Текст должен содержать от 1 до 4000 символов без управляющих символов".to_string(),
+        );
     }
     Ok((application.to_string(), text.to_string()))
 }
@@ -462,7 +476,11 @@ end run
         }
         return Ok(ActionResult {
             success: true,
-            message: if submit { format!("Текст введён и подтверждён в «{application}».") } else { format!("Текст введён в «{application}».") },
+            message: if submit {
+                format!("Текст введён и подтверждён в «{application}».")
+            } else {
+                format!("Текст введён в «{application}».")
+            },
         });
     }
     #[cfg(target_os = "windows")]
@@ -478,32 +496,54 @@ end run
 }
 
 fn percent_encode_query(value: &str) -> String {
-    value.bytes().map(|byte| match byte {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (byte as char).to_string(),
-        b' ' => "+".to_string(),
-        _ => format!("%{byte:02X}"),
-    }).collect()
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            b' ' => "+".to_string(),
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 #[tauri::command]
 pub(crate) fn search_in_browser(browser: String, query: String) -> Result<ActionResult, String> {
     let browser = browser.trim();
     let query = query.trim();
-    if browser.is_empty() || browser.chars().count() > 120 || query.is_empty() || query.chars().count() > 500 {
+    if browser.is_empty()
+        || browser.chars().count() > 120
+        || query.is_empty()
+        || query.chars().count() > 500
+    {
         return Err("Укажите браузер и поисковый запрос".to_string());
     }
-    let url = format!("https://www.google.com/search?q={}", percent_encode_query(query));
+    let url = format!(
+        "https://www.google.com/search?q={}",
+        percent_encode_query(query)
+    );
     #[cfg(target_os = "macos")]
-    let result = Command::new("/usr/bin/open").args(["-a", canonical_application_name(browser).as_str(), url.as_str()]).output();
+    let result = Command::new("/usr/bin/open")
+        .args([
+            "-a",
+            canonical_application_name(browser).as_str(),
+            url.as_str(),
+        ])
+        .output();
     #[cfg(target_os = "windows")]
     let result = Command::new("explorer.exe").arg(&url).output();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let result: std::io::Result<std::process::Output> = Err(std::io::Error::other("unsupported platform"));
+    let result: std::io::Result<std::process::Output> =
+        Err(std::io::Error::other("unsupported platform"));
     let output = result.map_err(|error| format!("Не удалось открыть поиск: {error}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-    Ok(ActionResult { success: true, message: format!("Поиск «{query}» открыт в браузере.") })
+    Ok(ActionResult {
+        success: true,
+        message: format!("Поиск «{query}» открыт в браузере."),
+    })
 }
 
 fn first_text(value: &serde_json::Value, path: &[&str]) -> Option<String> {
@@ -731,5 +771,21 @@ mod tests {
         assert!(validate_message("", "Текст").is_err());
         assert!(validate_message("Контакт", "").is_err());
         assert!(validate_message("Контакт", "строка\nс переносом").is_err());
+    }
+
+    #[test]
+    fn encodes_search_queries_without_shell_interpretation() {
+        assert_eq!(percent_encode_query("C-3PO rust"), "C-3PO+rust");
+        assert_eq!(
+            percent_encode_query("привет"),
+            "%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82"
+        );
+    }
+
+    #[test]
+    fn validates_confirmed_application_text() {
+        assert!(validate_automation_text("Notes", "Купить молоко").is_ok());
+        assert!(validate_automation_text("", "Текст").is_err());
+        assert!(validate_automation_text("Notes", "строка\nс переносом").is_err());
     }
 }

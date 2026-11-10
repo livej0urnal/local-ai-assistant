@@ -2930,8 +2930,19 @@ onBeforeUnmount(() => {
           </article>
           <article>
             <span class="permission-icon">▣</span>
-            <div><strong>Управление приложениями</strong><small>Нужно для подтверждённой отправки через Telegram</small></div>
-            <span class="permission-state prompt">по запросу macOS</span>
+            <div><strong>Управление приложениями</strong><small>{{ automationPermissions?.message || "Проверяю Универсальный доступ…" }}</small></div>
+            <span class="permission-state" :class="automationPermissions?.accessibility ? 'granted' : 'prompt'">
+              {{ automationPermissions?.accessibility ? "разрешено" : "нужно разрешение" }}
+            </span>
+            <button v-if="!automationPermissions?.accessibility" type="button" @click="openAutomationSettings('accessibility')">Открыть настройки</button>
+          </article>
+          <article>
+            <span class="permission-icon">▤</span>
+            <div><strong>Анализ экрана</strong><small>Нужен только для будущего распознавания содержимого окон</small></div>
+            <span class="permission-state" :class="automationPermissions?.screenRecording ? 'granted' : 'prompt'">
+              {{ automationPermissions?.screenRecording ? "разрешено" : "не запрошено" }}
+            </span>
+            <button v-if="!automationPermissions?.screenRecording" type="button" @click="openAutomationSettings('screen-recording')">Открыть настройки</button>
           </article>
         </div>
 

@@ -69,6 +69,20 @@ type LocalReply = {
   text: string;
 };
 
+type PrivateVoicePhrase = {
+  id: string;
+  category: "startup" | "success" | "warning" | "error" | "waiting" | "introduction" | "shutdown" | "general";
+  text: string;
+  file: string;
+  recommended: boolean;
+};
+
+type PrivateVoiceCatalog = {
+  version: number;
+  private: true;
+  phrases: PrivateVoicePhrase[];
+};
+
 type NativeCapability = {
   id: string;
   available: boolean;
@@ -86,6 +100,7 @@ type EnvironmentReport = {
 
 type PermissionState = "checking" | "prompt" | "granted" | "denied" | "unsupported";
 type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "paused" | "error";
+type ThemePreference = "system" | "light" | "dark";
 
 type AppError = {
   title: string;
@@ -122,6 +137,21 @@ const storedInterfaceLanguage = window.localStorage.getItem("c3po.interface-lang
 const storedCommandLanguage = window.localStorage.getItem("c3po.command-language");
 const interfaceLanguage = ref<LanguageCode>(isLanguageCode(storedInterfaceLanguage) ? storedInterfaceLanguage : "ru");
 const commandLanguage = ref<LanguageCode>(isLanguageCode(storedCommandLanguage) ? storedCommandLanguage : "ru");
+const storedTheme = window.localStorage.getItem("c3po.theme");
+const themePreference = ref<ThemePreference>(storedTheme === "light" || storedTheme === "dark" ? storedTheme : "system");
+const silentMode = ref(window.localStorage.getItem("c3po.silent-mode") === "true");
+const systemDarkMode = window.matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme() {
+  const resolved = themePreference.value === "system"
+    ? (systemDarkMode.matches ? "dark" : "light")
+    : themePreference.value;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+  window.localStorage.setItem("c3po.theme", themePreference.value);
+}
+
+applyTheme();
 
 function readProfiles(): UserProfile[] {
   try {
@@ -186,6 +216,32 @@ const dialogLabels: Record<LanguageCode, { list: string; newDialog: string; empt
   zh: { list: "对话历史", newDialog: "新对话", empty: "暂无对话" },
   ja: { list: "会話履歴", newDialog: "新しい会話", empty: "会話はまだありません" },
   ar: { list: "سجل المحادثات", newDialog: "محادثة جديدة", empty: "لا توجد محادثات بعد" },
+};
+
+const settingsLabels: Record<LanguageCode, { settings: string; appearance: string; system: string; light: string; dark: string; background: string; wake: string; active: string }> = {
+  ru: { settings: "Настройки", appearance: "Оформление", system: "Как в системе", light: "Светлая", dark: "Тёмная", background: "Фоновый режим", wake: "Пробуждение по имени C-3PO", active: "Активно" },
+  en: { settings: "Settings", appearance: "Appearance", system: "System", light: "Light", dark: "Dark", background: "Background mode", wake: "Wake with the name C-3PO", active: "Active" },
+  es: { settings: "Ajustes", appearance: "Apariencia", system: "Sistema", light: "Claro", dark: "Oscuro", background: "Modo en segundo plano", wake: "Activar con el nombre C-3PO", active: "Activo" },
+  de: { settings: "Einstellungen", appearance: "Darstellung", system: "System", light: "Hell", dark: "Dunkel", background: "Hintergrundmodus", wake: "Mit C-3PO aktivieren", active: "Aktiv" },
+  fr: { settings: "Réglages", appearance: "Apparence", system: "Système", light: "Clair", dark: "Sombre", background: "Mode arrière-plan", wake: "Activation avec C-3PO", active: "Actif" },
+  it: { settings: "Impostazioni", appearance: "Aspetto", system: "Sistema", light: "Chiaro", dark: "Scuro", background: "Modalità in background", wake: "Attiva con C-3PO", active: "Attivo" },
+  pt: { settings: "Configurações", appearance: "Aparência", system: "Sistema", light: "Claro", dark: "Escuro", background: "Modo em segundo plano", wake: "Ativar com C-3PO", active: "Ativo" },
+  zh: { settings: "设置", appearance: "外观", system: "跟随系统", light: "浅色", dark: "深色", background: "后台模式", wake: "通过 C-3PO 唤醒", active: "已启用" },
+  ja: { settings: "設定", appearance: "外観", system: "システム", light: "ライト", dark: "ダーク", background: "バックグラウンドモード", wake: "C-3POで起動", active: "有効" },
+  ar: { settings: "الإعدادات", appearance: "المظهر", system: "النظام", light: "فاتح", dark: "داكن", background: "وضع الخلفية", wake: "التنشيط باسم C-3PO", active: "نشط" },
+};
+
+const silentModeLabels: Record<LanguageCode, { title: string; description: string }> = {
+  ru: { title: "Беззвучный режим", description: "Только текстовый чат, без микрофона и озвучки" },
+  en: { title: "Silent mode", description: "Text chat only, without microphone or speech" },
+  es: { title: "Modo silencioso", description: "Solo chat de texto, sin micrófono ni voz" },
+  de: { title: "Stiller Modus", description: "Nur Textchat, ohne Mikrofon und Sprache" },
+  fr: { title: "Mode silencieux", description: "Dialogue texte uniquement, sans microphone ni voix" },
+  it: { title: "Modalità silenziosa", description: "Solo chat testuale, senza microfono né voce" },
+  pt: { title: "Modo silencioso", description: "Somente chat de texto, sem microfone ou voz" },
+  zh: { title: "静音模式", description: "仅文字聊天，不使用麦克风和语音" },
+  ja: { title: "サイレントモード", description: "マイクと音声を使わずテキストチャットのみ" },
+  ar: { title: "الوضع الصامت", description: "دردشة نصية فقط دون ميكروفون أو صوت" },
 };
 
 function introductionPrompt(language: LanguageCode) {
@@ -378,6 +434,7 @@ const chatOpen = ref(false);
 const permissionsOpen = ref(false);
 const llmOpen = ref(false);
 const languageOpen = ref(false);
+const settingsOpen = ref(false);
 const onboardingOpen = ref(false);
 const voiceState = ref<VoiceState>("idle");
 const microphonePermission = ref<PermissionState>("checking");
@@ -402,6 +459,7 @@ const llmStatus = ref<LlmStatus | null>(null);
 const llmLoading = ref(false);
 const llmRuntime = ref<LlmRuntimeStatus | null>(null);
 const llmTestReply = ref("");
+const privateVoiceCatalog = ref<PrivateVoiceCatalog | null>(null);
 
 let recognition: RecognitionLike | null = null;
 let microphoneStream: MediaStream | null = null;
@@ -412,6 +470,8 @@ let restartTimer = 0;
 let shouldListen = false;
 let memoryTimer = 0;
 let voiceDemoIndex = 0;
+let privateVoiceIndex = 0;
+let privateVoiceAudio: HTMLAudioElement | null = null;
 const microphonePermissionStorageKey = "c3po.microphone-permission";
 
 function savedMicrophonePermission(): PermissionState | null {
@@ -508,6 +568,37 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
 }
 
+async function loadPrivateVoiceCatalog() {
+  try {
+    const response = await fetch("/private-audio/catalog.json", { cache: "no-store" });
+    if (!response.ok) return;
+    privateVoiceCatalog.value = await response.json() as PrivateVoiceCatalog;
+  } catch {
+    // Приватный голосовой пакет необязателен и намеренно отсутствует в Git.
+  }
+}
+
+async function playPrivateVoice(category: PrivateVoicePhrase["category"]) {
+  if (silentMode.value || commandLanguage.value !== "ru" || !privateVoiceCatalog.value) return false;
+  const candidates = privateVoiceCatalog.value.phrases.filter(
+    (phrase) => phrase.category === category && phrase.recommended,
+  );
+  if (!candidates.length) return false;
+  const phrase = candidates[privateVoiceIndex % candidates.length];
+  privateVoiceIndex += 1;
+  privateVoiceAudio?.pause();
+  privateVoiceAudio = new Audio(`/private-audio/${phrase.file}`);
+  privateVoiceAudio.volume = 0.9;
+  try {
+    await privateVoiceAudio.play();
+    lastCommand.value = phrase.text;
+    return true;
+  } catch (error) {
+    await writeLog("warn", "voice.private-pack", `Не удалось воспроизвести ${phrase.id}: ${String(error)}`);
+    return false;
+  }
+}
+
 async function loadLlmStatus() {
   if (!("__TAURI_INTERNALS__" in window)) {
     llmStatus.value = {
@@ -569,6 +660,7 @@ async function stopLocalModel() {
   if (!("__TAURI_INTERNALS__" in window)) return;
   llmRuntime.value = await invoke<LlmRuntimeStatus>("stop_llm");
   llmTestReply.value = moviePhrase("shutdown");
+  await playPrivateVoice("shutdown");
   void playR2D2Signal("shutdown");
   await refreshProcessMetrics();
 }
@@ -576,6 +668,7 @@ async function stopLocalModel() {
 type R2D2Mood = "thinking" | "success" | "error" | "shutdown";
 
 async function playR2D2Signal(mood: R2D2Mood) {
+  if (silentMode.value) return;
   // Это оригинальные процедурно созданные сигналы, а не аудиофрагменты фильма.
   // Позже этот слой можно заменить лицензированным звуковым пакетом.
   droidAudioContext ??= new AudioContext();
@@ -628,6 +721,7 @@ async function askLocalModel(prompt: string, showInConversation = true) {
     return reply.text;
   } catch (error) {
     await playR2D2Signal("error");
+    await playPrivateVoice("error");
     const details = errorDetails(error);
     const message = `Локальная модель не ответила: ${details.message}`;
     llmTestReply.value = message;
@@ -998,6 +1092,13 @@ async function inspectMicrophonePermission() {
     return;
   }
 
+  if (silentMode.value) {
+    microphonePermission.value = (await hasRememberedMicrophoneApproval()) ? "granted" : "prompt";
+    onboardingOpen.value = false;
+    voiceState.value = "paused";
+    return;
+  }
+
   const rememberedApproval = await hasRememberedMicrophoneApproval();
   let reportedState: PermissionState | null = null;
   try {
@@ -1056,7 +1157,7 @@ async function toggleMicrophone() {
 }
 
 function speak(text: string) {
-  if (!synthesisAvailable.value) return;
+  if (silentMode.value || !synthesisAvailable.value) return;
 
   voiceState.value = "speaking";
   recognition?.stop();
@@ -1083,7 +1184,13 @@ function speak(text: string) {
   window.speechSynthesis.speak(utterance);
 }
 
-function testVoice() {
+async function testVoice() {
+  const situations: PrivateVoicePhrase["category"][] = ["introduction", "success", "warning", "error", "shutdown"];
+  if (await playPrivateVoice(situations[voiceDemoIndex % situations.length])) {
+    voiceDemoIndex += 1;
+    addMessage("assistant", lastCommand.value);
+    return;
+  }
   const phrase = commandLanguage.value === "ru"
     ? voiceDemoPhrases[voiceDemoIndex % voiceDemoPhrases.length]
     : commandText("greeting");
@@ -1098,7 +1205,9 @@ function proposeSystemInfo() {
   voiceState.value = "idle";
   const response = `${moviePhrase("riskyAction")} Скажите «выполнить» или нажмите кнопку подтверждения.`;
   addMessage("assistant", response);
-  speak(response);
+  void playPrivateVoice("warning").then((played) => {
+    if (!played) speak(response);
+  });
 }
 
 function cancelAction() {
@@ -1231,6 +1340,25 @@ function saveInterfaceLanguage() {
   }
 }
 
+function selectTheme(theme: ThemePreference) {
+  themePreference.value = theme;
+  applyTheme();
+}
+
+async function toggleSilentMode() {
+  silentMode.value = !silentMode.value;
+  window.localStorage.setItem("c3po.silent-mode", String(silentMode.value));
+  if (silentMode.value) {
+    onboardingOpen.value = false;
+    pauseMicrophone();
+    window.speechSynthesis?.cancel();
+    privateVoiceAudio?.pause();
+    return;
+  }
+  if (await hasRememberedMicrophoneApproval()) await requestMicrophone();
+  else onboardingOpen.value = true;
+}
+
 function saveCommandLanguage() {
   window.localStorage.setItem("c3po.command-language", commandLanguage.value);
   const resumeListening = shouldListen;
@@ -1246,6 +1374,8 @@ onMounted(async () => {
   saveInterfaceLanguage();
   saveCommandLanguage();
   await loadEnvironment();
+  await loadPrivateVoiceCatalog();
+  void playPrivateVoice("startup");
   await loadLlmStatus();
   configureRecognition();
   await refreshProcessMetrics();
@@ -1261,6 +1391,7 @@ onBeforeUnmount(() => {
   window.speechSynthesis?.cancel();
   audioContext?.close();
   droidAudioContext?.close();
+  privateVoiceAudio?.pause();
 });
 </script>
 
@@ -1300,6 +1431,9 @@ onBeforeUnmount(() => {
           <span>{{ t("permissions") }}</span>
           <i :class="microphonePermission"></i>
         </button>
+        <button class="ghost-button settings-button" type="button" :aria-label="settingsLabels[interfaceLanguage].settings" @click="settingsOpen = true">
+          <span class="button-icon">⚙</span>
+        </button>
         <button class="chat-button" type="button" :aria-label="t('openChat')" @click="chatOpen = true">
           <span>{{ t("openChat") }}</span>
           <b>{{ Math.max(0, messages.length - 1) }}</b>
@@ -1317,6 +1451,25 @@ onBeforeUnmount(() => {
           <img :src="droidPortrait" alt="Золотой протокольный дроид C-3PO" />
           <div class="voice-spectrum" aria-hidden="true">
             <i v-for="index in 18" :key="index" :style="{ '--index': index }"></i>
+          </div>
+        </div>
+
+        <div v-if="voiceState === 'thinking' && isWorking" class="r2-consultation" aria-live="polite">
+          <div class="r2-hologram" aria-hidden="true">
+            <span class="r2-orbit orbit-a"></span>
+            <span class="r2-orbit orbit-b"></span>
+            <div class="r2-unit">
+              <div class="r2-dome"><i></i><b></b></div>
+              <div class="r2-body"><i></i><i></i><i></i></div>
+              <span class="r2-leg leg-left"></span>
+              <span class="r2-leg leg-right"></span>
+            </div>
+            <div class="r2-beam"></div>
+          </div>
+          <div class="r2-consultation-copy">
+            <span>R2-D2 · LOCAL CORE</span>
+            <strong>{{ t("consultingR2") }}</strong>
+            <div class="r2-data-line"><i v-for="index in 12" :key="index"></i></div>
           </div>
         </div>
 
@@ -1477,6 +1630,49 @@ onBeforeUnmount(() => {
           <button type="submit" :disabled="!canSend">↑</button>
         </form>
       </aside>
+    </div>
+
+    <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
+      <section class="permission-modal settings-modal" :aria-label="settingsLabels[interfaceLanguage].settings">
+        <header>
+          <div class="language-title">
+            <span class="language-emblem">⚙</span>
+            <div>
+              <span class="eyebrow">C-3PO</span>
+              <h2>{{ settingsLabels[interfaceLanguage].settings }}</h2>
+            </div>
+          </div>
+          <button type="button" :aria-label="t('close')" @click="settingsOpen = false">×</button>
+        </header>
+
+        <div class="settings-content">
+          <section class="settings-section">
+            <span class="settings-section-title">{{ settingsLabels[interfaceLanguage].appearance }}</span>
+            <div class="theme-selector">
+              <button type="button" :class="{ active: themePreference === 'system' }" @click="selectTheme('system')">◐ <span>{{ settingsLabels[interfaceLanguage].system }}</span></button>
+              <button type="button" :class="{ active: themePreference === 'light' }" @click="selectTheme('light')">☀ <span>{{ settingsLabels[interfaceLanguage].light }}</span></button>
+              <button type="button" :class="{ active: themePreference === 'dark' }" @click="selectTheme('dark')">● <span>{{ settingsLabels[interfaceLanguage].dark }}</span></button>
+            </div>
+          </section>
+
+          <button class="settings-toggle" type="button" :class="{ active: silentMode }" @click="toggleSilentMode">
+            <span class="settings-row-icon">{{ silentMode ? "×" : "♫" }}</span>
+            <span><strong>{{ silentModeLabels[interfaceLanguage].title }}</strong><small>{{ silentModeLabels[interfaceLanguage].description }}</small></span>
+            <i><b></b></i>
+          </button>
+
+          <div class="settings-status-grid">
+            <article><span>◉</span><div><strong>{{ settingsLabels[interfaceLanguage].background }}</strong><small>{{ settingsLabels[interfaceLanguage].active }}</small></div><i></i></article>
+            <article><span>⌁</span><div><strong>{{ settingsLabels[interfaceLanguage].wake }}</strong><small>C-3PO · C3PO · Си-три-пи-о</small></div><i></i></article>
+          </div>
+
+          <div class="settings-links">
+            <button type="button" @click="settingsOpen = false; languageOpen = true"><span>文</span>{{ t("languageSettings") }}<b>→</b></button>
+            <button type="button" @click="settingsOpen = false; openPermissions()"><span>⌾</span>{{ t("permissions") }}<b>→</b></button>
+            <button type="button" @click="settingsOpen = false; openLlmPanel()"><span>◈</span>{{ llmShortLabel }}<b>→</b></button>
+          </div>
+        </div>
+      </section>
     </div>
 
     <div v-if="languageOpen" class="modal-backdrop" @click.self="languageOpen = false">

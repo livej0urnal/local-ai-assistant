@@ -32,13 +32,14 @@ impl Drop for LlmRuntime {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LocalModelFile {
     name: String,
     path: String,
     size_bytes: u64,
     valid_gguf: bool,
+    role: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +50,7 @@ pub(crate) struct LlmStatus {
     engine_path: Option<String>,
     model_directory: String,
     selected_model: Option<LocalModelFile>,
+    models: Vec<LocalModelFile>,
     discovered_models: usize,
     message: String,
 }
@@ -68,6 +70,8 @@ pub(crate) struct LlmRuntimeStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LocalReply {
     text: String,
+    model: String,
+    task: String,
 }
 
 fn model_directory() -> Result<PathBuf, String> {
@@ -170,6 +174,7 @@ fn discover_models(directory: &Path) -> Result<Vec<LocalModelFile>, String> {
             path: path.display().to_string(),
             size_bytes: metadata.len(),
             valid_gguf: has_gguf_header(&path),
+            role: model_role(&entry.file_name().to_string_lossy()),
         });
     }
 
@@ -177,14 +182,110 @@ fn discover_models(directory: &Path) -> Result<Vec<LocalModelFile>, String> {
     Ok(models)
 }
 
+fn model_role(name: &str) -> String {
+    let name = name.to_ascii_lowercase();
+    if name.contains("coder") {
+        "code".to_string()
+    } else if name.contains("qwen3") || name.contains("creative") {
+        "writing-mail".to_string()
+    } else {
+        "general".to_string()
+    }
+}
+
+fn model_id(model: &LocalModelFile) -> String {
+    Path::new(&model.name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&model.name)
+        .to_string()
+}
+
+fn task_for_prompt(prompt: &str) -> &'static str {
+    let prompt = prompt.to_lowercase();
+    if [
+        "код",
+        "rust",
+        "php",
+        "typescript",
+        "javascript",
+        "python",
+        "функци",
+        "ошибк",
+        "bug",
+        "code",
+        "compile",
+    ]
+    .iter()
+    .any(|marker| prompt.contains(marker))
+    {
+        "code"
+    } else if [
+        "почт",
+        "письм",
+        "email",
+        "e-mail",
+        "inbox",
+        "отправитель",
+        "входящ",
+    ]
+    .iter()
+    .any(|marker| prompt.contains(marker))
+    {
+        "mail"
+    } else if [
+        "напиши",
+        "сгенерируй",
+        "текст",
+        "статья",
+        "сценар",
+        "rewrite",
+        "write",
+        "generate",
+    ]
+    .iter()
+    .any(|marker| prompt.contains(marker))
+    {
+        "writing"
+    } else {
+        "general"
+    }
+}
+
+fn select_model_for_task(directory: &Path, task: &str) -> Result<LocalModelFile, String> {
+    let models: Vec<_> = discover_models(directory)?
+        .into_iter()
+        .filter(|model| model.valid_gguf)
+        .collect();
+    if models.is_empty() {
+        return Err("Корректная GGUF-модель не найдена".to_string());
+    }
+    let preferred_role = if task == "code" {
+        "code"
+    } else if task == "mail" || task == "writing" {
+        "writing-mail"
+    } else {
+        "general"
+    };
+    models
+        .iter()
+        .filter(|model| model.role == preferred_role)
+        .max_by_key(|model| model.size_bytes)
+        .cloned()
+        .or_else(|| models.into_iter().find(|model| model.role == "general"))
+        .ok_or_else(|| "Подходящая локальная модель не найдена".to_string())
+}
+
 fn selected_runtime_parts() -> Result<(PathBuf, PathBuf), String> {
     let engine = find_llama_server().ok_or_else(|| "Движок llama-server не найден".to_string())?;
     let directory = model_directory()?;
-    let model = discover_models(&directory)?
+    if !discover_models(&directory)?
         .into_iter()
-        .find(|model| model.valid_gguf)
-        .ok_or_else(|| "Корректная GGUF-модель не найдена".to_string())?;
-    Ok((engine, PathBuf::from(model.path)))
+        .any(|model| model.valid_gguf)
+    {
+        return Err("Корректная GGUF-модель не найдена".to_string());
+    }
+    Ok((engine, directory))
 }
 
 fn server_address() -> SocketAddr {
@@ -246,9 +347,9 @@ fn runtime_status(runtime: &LlmRuntime) -> Result<LlmRuntimeStatus, String> {
 pub(crate) fn get_llm_status() -> Result<LlmStatus, String> {
     let directory = model_directory()?;
     let engine = find_llama_server();
-    let mut models = discover_models(&directory)?;
+    let models = discover_models(&directory)?;
     let discovered_models = models.len();
-    let selected_model = models.drain(..).find(|model| model.valid_gguf);
+    let selected_model = models.iter().find(|model| model.valid_gguf).cloned();
 
     let (state, message) = match (&engine, &selected_model) {
         (None, _) => (
@@ -275,6 +376,7 @@ pub(crate) fn get_llm_status() -> Result<LlmStatus, String> {
         engine_path: engine.map(|path| path.display().to_string()),
         model_directory: directory.display().to_string(),
         selected_model,
+        models,
         discovered_models,
         message: message.to_string(),
     })
@@ -305,7 +407,7 @@ pub(crate) fn start_llm(runtime: State<'_, LlmRuntime>) -> Result<LlmRuntimeStat
             return runtime_status(&runtime);
         }
 
-        let (engine, model) = selected_runtime_parts()?;
+        let (engine, models_directory) = selected_runtime_parts()?;
         let log_directory = model_directory()?
             .parent()
             .ok_or_else(|| "Не удалось определить папку журнала модели".to_string())?
@@ -319,12 +421,16 @@ pub(crate) fn start_llm(runtime: State<'_, LlmRuntime>) -> Result<LlmRuntimeStat
             .map_err(|error| error.to_string())?;
         let stderr = stdout.try_clone().map_err(|error| error.to_string())?;
 
-        // Аргументы задаются отдельно, без shell-строки: путь модели не может
-        // превратиться в произвольную команду. Сервер слушает только localhost.
+        // Режим маршрутизатора позволяет держать несколько моделей в каталоге,
+        // но загружает в память только ту, которая нужна текущей задаче.
+        // Аргументы передаются без shell-строки, а сервер слушает только localhost.
         let child = Command::new(engine)
-            .arg("--model")
-            .arg(model)
+            .arg("--models-dir")
+            .arg(models_directory)
             .args([
+                "--models-max",
+                "1",
+                "--models-autoload",
                 "--host",
                 LLAMA_HOST,
                 "--port",
@@ -378,6 +484,10 @@ pub(crate) fn generate_local_reply(
         return Err("Локальная модель ещё не готова".to_string());
     }
 
+    let task = task_for_prompt(prompt);
+    let selected_model = select_model_for_task(&model_directory()?, task)?;
+    let selected_model_id = model_id(&selected_model);
+
     // Разрешаем только языки из интерфейса. Это не даёт произвольному тексту
     // попасть в системную инструкцию модели.
     let greeting = match language.as_str() {
@@ -405,7 +515,7 @@ pub(crate) fn generate_local_reply(
     );
 
     let request = serde_json::json!({
-        "model": "local",
+        "model": selected_model_id,
         "messages": [
             {
                 "role": "system",
@@ -428,7 +538,15 @@ pub(crate) fn generate_local_reply(
         "stream": false
     });
 
-    let mut response = ureq::post(format!(
+    // Ограничиваем весь локальный запрос по времени. Если модель или старый
+    // процесс llama-server зависли, интерфейс получит ошибку и вернётся в
+    // рабочее состояние вместо бесконечного индикатора ожидания.
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(90)))
+        .build()
+        .new_agent();
+    let mut response = agent
+    .post(format!(
         "http://{LLAMA_HOST}:{LLAMA_PORT}/v1/chat/completions"
     ))
     .send_json(request)
@@ -445,6 +563,8 @@ pub(crate) fn generate_local_reply(
 
     Ok(LocalReply {
         text: text.to_string(),
+        model: selected_model.name,
+        task: task.to_string(),
     })
 }
 
@@ -473,5 +593,20 @@ mod tests {
             .expect("test data should be written");
 
         assert!(!has_gguf_header(&path));
+    }
+
+    #[test]
+    fn recognises_specialised_model_roles() {
+        assert_eq!(model_role("Qwen2.5-Coder-3B.gguf"), "code");
+        assert_eq!(model_role("Qwen3-4B.gguf"), "writing-mail");
+        assert_eq!(model_role("Qwen2.5-1.5B.gguf"), "general");
+    }
+
+    #[test]
+    fn routes_common_tasks_without_sending_data_anywhere() {
+        assert_eq!(task_for_prompt("Помоги исправить Rust код"), "code");
+        assert_eq!(task_for_prompt("Проанализируй входящие письма"), "mail");
+        assert_eq!(task_for_prompt("Напиши короткую статью"), "writing");
+        assert_eq!(task_for_prompt("Который час?"), "general");
     }
 }

@@ -52,6 +52,7 @@ type LlmStatus = {
   enginePath: string | null;
   modelDirectory: string;
   selectedModel: LocalModelFile | null;
+  models?: LocalModelFile[];
   discoveredModels: number;
   message: string;
 };
@@ -67,6 +68,8 @@ type LlmRuntimeStatus = {
 
 type LocalReply = {
   text: string;
+  model?: string;
+  task?: string;
 };
 
 type PrivateVoicePhrase = {
@@ -430,6 +433,7 @@ const liveTranscript = ref("");
 const lastCommand = ref(initialProfile ? t("sayCommand") : introductionPrompt(commandLanguage.value));
 const pendingAction = ref(false);
 const isWorking = ref(false);
+const isConsultingR2 = ref(false);
 const chatOpen = ref(false);
 const permissionsOpen = ref(false);
 const llmOpen = ref(false);
@@ -588,10 +592,18 @@ async function playPrivateVoice(category: PrivateVoicePhrase["category"]) {
   privateVoiceIndex += 1;
   privateVoiceAudio?.pause();
   privateVoiceAudio = new Audio(`/private-audio/${phrase.file}`);
+  privateVoiceAudio.preload = "auto";
+  privateVoiceAudio.autoplay = true;
   privateVoiceAudio.volume = 0.9;
+  // Показываем произносимую фразу сразу: пользователь видит, что именно
+  // выбрал C-3PO, даже если системный аудиовыход временно недоступен.
+  lastCommand.value = phrase.text;
   try {
     await privateVoiceAudio.play();
-    lastCommand.value = phrase.text;
+    await writeLog("info", "voice.private-pack", `Запущена локальная фраза ${phrase.id}`, {
+      category,
+      file: phrase.file,
+    });
     return true;
   } catch (error) {
     await writeLog("warn", "voice.private-pack", `Не удалось воспроизвести ${phrase.id}: ${String(error)}`);
@@ -626,7 +638,9 @@ async function loadLlmStatus() {
 }
 
 async function waitForLocalModel() {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  // Не оставляем интерфейс в бесконечном ожидании, если llama-server не смог
+  // запуститься (например, порт уже занят старым процессом).
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     const status = await invoke<LlmRuntimeStatus>("get_llm_runtime_status");
     llmRuntime.value = status;
     if (status.ready) return true;
@@ -701,9 +715,12 @@ async function playR2D2Signal(mood: R2D2Mood) {
 
 async function askLocalModel(prompt: string, showInConversation = true) {
   isWorking.value = true;
+  isConsultingR2.value = true;
   voiceState.value = "thinking";
   lastCommand.value = t("consultingR2");
   try {
+    // Даём Vue отрисовать R2-D2 до запуска тяжёлого локального запроса.
+    await nextTick();
     await playR2D2Signal("thinking");
     if (!llmRuntime.value?.ready && !(await startLocalModel())) {
       throw new Error("Локальная модель не запустилась");
@@ -730,7 +747,13 @@ async function askLocalModel(prompt: string, showInConversation = true) {
     await writeLog("error", "llm.generate", `${details.name}: ${details.message}`);
     return "";
   } finally {
+    isConsultingR2.value = false;
     isWorking.value = false;
+    // Если синтез речи недоступен или включён тихий режим, speak() не меняет
+    // состояние. Не оставляем экран навечно в режиме «думаю».
+    if (voiceState.value === "thinking") {
+      voiceState.value = microphoneActive.value ? "listening" : "idle";
+    }
   }
 }
 
@@ -1454,7 +1477,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="voiceState === 'thinking' && isWorking" class="r2-consultation" aria-live="polite">
+        <div v-if="isConsultingR2" class="r2-consultation" aria-live="polite">
           <div class="r2-hologram" aria-hidden="true">
             <span class="r2-orbit orbit-a"></span>
             <span class="r2-orbit orbit-b"></span>

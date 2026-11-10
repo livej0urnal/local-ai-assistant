@@ -345,7 +345,9 @@ pub fn run() {
                 .build(app)?;
             let open = MenuItemBuilder::with_id("open", "Открыть C-3PO").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Завершить C-3PO").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&status, &open, &quit]).build()?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&status, &open, &quit])
+                .build()?;
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("application icon").clone())
@@ -381,7 +383,7 @@ pub fn run() {
             // macOS/Windows всё равно показывают пользователю своё системное окно.
             // Все остальные виды доступа используют безопасное поведение по умолчанию.
             let response = match kind {
-                PermissionKind::Microphone => PermissionResponse::Allow,
+                PermissionKind::Microphone | PermissionKind::Autoplay => PermissionResponse::Allow,
                 _ => PermissionResponse::Default,
             };
             append_native_log(

@@ -41,3 +41,17 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("failed to run C-3PO");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_information_is_available() {
+        let info = get_system_info().expect("system information should be available");
+
+        assert!(!info.operating_system.is_empty());
+        assert!(!info.architecture.is_empty());
+        assert!(info.total_memory_mb > 0);
+    }
+}

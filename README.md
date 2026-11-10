@@ -2,17 +2,30 @@
 
 Локальный компьютерный помощник C-3PO для macOS и Windows.
 
-Проект разрабатывается на Rust с будущим интерфейсом на Tauri 2 и Vue 3.
+Интерфейс написан на Vue 3 и TypeScript, а локальная системная логика — на Rust и Tauri 2.
 Локальная языковая модель будет подключена через llama.cpp на одном из следующих этапов.
 
-## Запуск
+## Установка
 
 ```bash
-cargo run
+npm install
 ```
 
-## Проверка
+## Запуск интерфейса в браузере
 
 ```bash
-cargo test
+npm run dev
+```
+
+## Запуск настольного приложения
+
+```bash
+npm run tauri dev
+```
+
+## Проверка проекта
+
+```bash
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
 ```

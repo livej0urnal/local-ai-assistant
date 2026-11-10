@@ -1,13 +1,23 @@
 [package]
 name = "local-ai-assistant"
 version = "0.1.0"
+description = "A safe local AI assistant for macOS and Windows"
+authors = ["Igor Filippov"]
 edition = "2024"
+
+[lib]
+name = "local_ai_assistant_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 directories = "6.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sysinfo = "0.40.1"
+tauri = { version = "2", features = [] }
 thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

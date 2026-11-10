@@ -338,6 +338,7 @@ pub fn run() {
     append_native_log("info", "rust.application", "Starting C-3PO");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(llm::LlmRuntime::default())
         .setup(|app| {
             let status = MenuItemBuilder::with_id("status", "● C-3PO работает в фоне")

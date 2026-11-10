@@ -14,7 +14,10 @@ use sysinfo::{Pid, System};
 use tauri::State;
 
 const LLAMA_HOST: &str = "127.0.0.1";
-const LLAMA_PORT: u16 = 11435;
+// Используем отдельный порт приложения. Так старый llama-server, который
+// разработчик мог запустить вручную на стандартном тестовом порту 11435,
+// не мешает управляемому процессу R2-D2.
+const LLAMA_PORT: u16 = 11436;
 
 #[derive(Default)]
 pub(crate) struct LlmRuntime {
@@ -546,11 +549,11 @@ pub(crate) fn generate_local_reply(
         .build()
         .new_agent();
     let mut response = agent
-    .post(format!(
-        "http://{LLAMA_HOST}:{LLAMA_PORT}/v1/chat/completions"
-    ))
-    .send_json(request)
-    .map_err(|error| format!("Ошибка локального запроса: {error}"))?;
+        .post(format!(
+            "http://{LLAMA_HOST}:{LLAMA_PORT}/v1/chat/completions"
+        ))
+        .send_json(request)
+        .map_err(|error| format!("Ошибка локального запроса: {error}"))?;
     let payload: serde_json::Value = response
         .body_mut()
         .read_json()

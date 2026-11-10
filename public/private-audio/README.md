@@ -9,4 +9,11 @@
 node scripts/build-private-voice-catalog.mjs <source.mp3> <whisper.json>
 ```
 
+Скрипт создаёт `catalog.json` и отдельные MP3-фрагменты, размеченные по ситуациям: `startup`,
+`introduction`, `waiting`, `success`, `warning`, `error` и `shutdown`. Приложение сначала произносит
+стартовую фразу, затем включает микрофон, чтобы не распознать собственный голос как команду.
+
+В production CSP должны оставаться `connect-src 'self'` и `media-src 'self'`, иначе встроенный
+каталог и аудио будут заблокированы WebView.
+
 Перед распространением записи необходимо отдельно подтвердить права на голос и исходные фрагменты.

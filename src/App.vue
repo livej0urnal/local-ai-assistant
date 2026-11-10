@@ -476,6 +476,7 @@ let memoryTimer = 0;
 let voiceDemoIndex = 0;
 let privateVoiceIndex = 0;
 let privateVoiceAudio: HTMLAudioElement | null = null;
+let privateVoicePlaying = false;
 const microphonePermissionStorageKey = "c3po.microphone-permission";
 
 function savedMicrophonePermission(): PermissionState | null {
@@ -573,17 +574,39 @@ function formatBytes(bytes: number) {
 }
 
 async function loadPrivateVoiceCatalog() {
-  try {
-    const response = await fetch("/private-audio/catalog.json", { cache: "no-store" });
-    if (!response.ok) return;
-    privateVoiceCatalog.value = await response.json() as PrivateVoiceCatalog;
-  } catch {
-    // Приватный голосовой пакет необязателен и намеренно отсутствует в Git.
+  for (const catalogUrl of ["./private-audio/catalog.json", "/private-audio/catalog.json"]) {
+    try {
+      const response = await fetch(catalogUrl, { cache: "no-store" });
+      if (!response.ok) continue;
+      privateVoiceCatalog.value = await response.json() as PrivateVoiceCatalog;
+      await writeLog("info", "voice.private-pack", "Локальный голосовой пакет загружен", {
+        catalogUrl,
+        phrases: privateVoiceCatalog.value.phrases.length,
+      });
+      return;
+    } catch (error) {
+      await writeLog("warn", "voice.private-pack", `Не удалось загрузить каталог ${catalogUrl}: ${String(error)}`);
+    }
   }
+  // Пакет необязателен для публичной сборки, но причина его отсутствия всегда
+  // остаётся в локальном журнале и больше не теряется молча.
+  await writeLog("warn", "voice.private-pack", "Локальный каталог voice.mp3 не найден в сборке");
 }
 
-async function playPrivateVoice(category: PrivateVoicePhrase["category"]) {
-  if (silentMode.value || commandLanguage.value !== "ru" || !privateVoiceCatalog.value) return false;
+async function playPrivateVoice(
+  category: PrivateVoicePhrase["category"],
+  replaceCaption = true,
+  waitForCompletion = false,
+) {
+  if (silentMode.value || commandLanguage.value !== "ru" || !privateVoiceCatalog.value) {
+    await writeLog("info", "voice.private-pack", "Фраза пропущена", {
+      category,
+      silentMode: silentMode.value,
+      commandLanguage: commandLanguage.value,
+      catalogLoaded: Boolean(privateVoiceCatalog.value),
+    });
+    return false;
+  }
   const candidates = privateVoiceCatalog.value.phrases.filter(
     (phrase) => phrase.category === category && phrase.recommended,
   );
@@ -591,24 +614,60 @@ async function playPrivateVoice(category: PrivateVoicePhrase["category"]) {
   const phrase = candidates[privateVoiceIndex % candidates.length];
   privateVoiceIndex += 1;
   privateVoiceAudio?.pause();
-  privateVoiceAudio = new Audio(`/private-audio/${phrase.file}`);
+  privateVoiceAudio = new Audio(`./private-audio/${phrase.file}`);
   privateVoiceAudio.preload = "auto";
   privateVoiceAudio.autoplay = true;
   privateVoiceAudio.volume = 0.9;
   // Показываем произносимую фразу сразу: пользователь видит, что именно
   // выбрал C-3PO, даже если системный аудиовыход временно недоступен.
-  lastCommand.value = phrase.text;
+  if (replaceCaption) lastCommand.value = phrase.text;
+  const resumeListening = shouldListen;
+  shouldListen = false;
+  privateVoicePlaying = true;
+  recognition?.stop();
+  voiceState.value = "speaking";
+
+  const restoreVoiceState = () => {
+    privateVoicePlaying = false;
+    const canResume = resumeListening && microphonePermission.value === "granted" && !silentMode.value;
+    voiceState.value = canResume ? "listening" : (silentMode.value ? "paused" : "idle");
+    if (canResume) startRecognition();
+  };
+  let finishPlayback = () => {};
+  const playbackFinished = new Promise<void>((resolve) => {
+    finishPlayback = resolve;
+  });
+  privateVoiceAudio.onended = () => {
+    restoreVoiceState();
+    finishPlayback();
+  };
+  privateVoiceAudio.onerror = () => {
+    restoreVoiceState();
+    finishPlayback();
+  };
   try {
-    await privateVoiceAudio.play();
-    await writeLog("info", "voice.private-pack", `Запущена локальная фраза ${phrase.id}`, {
+    await writeLog("info", "voice.private-pack", `Запуск локальной фразы ${phrase.id}`, {
       category,
       file: phrase.file,
     });
+    await privateVoiceAudio.play();
+    if (waitForCompletion) await playbackFinished;
     return true;
   } catch (error) {
+    restoreVoiceState();
+    finishPlayback();
     await writeLog("warn", "voice.private-pack", `Не удалось воспроизвести ${phrase.id}: ${String(error)}`);
     return false;
   }
+}
+
+function voiceReactionFor(text: string): PrivateVoicePhrase["category"] {
+  const normalized = text.toLowerCase();
+  if (/(ошиб|не удалось|недоступ|авари|error|failed)/u.test(normalized)) return "error";
+  if (/(разреш|подтверд|опас|риск|вниматель|permission)/u.test(normalized)) return "warning";
+  if (/(подожд|минут|дума|анализ|советуюсь|wait)/u.test(normalized)) return "waiting";
+  if (/(знаком|представ|привет|hello)/u.test(normalized)) return "introduction";
+  return "success";
 }
 
 async function loadLlmStatus() {
@@ -911,6 +970,8 @@ function getRecognitionConstructor(): RecognitionConstructor | undefined {
 }
 
 async function handleRecognizedSpeech(text: string) {
+  // Не позволяем микрофону принять голос самого C-3PO за новую команду.
+  if (privateVoicePlaying) return;
   // Системные распознаватели записывают имя по-разному, поэтому принимаем
   // латинское C-3PO и наиболее частые русские транскрипции.
   const wakeWord = /(?:\bc\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|\bc3po\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио)/iu;
@@ -986,6 +1047,7 @@ function configureRecognition() {
     }
   };
   recognition.onresult = (event) => {
+    if (privateVoicePlaying) return;
     let finalText = "";
     let interimText = "";
 
@@ -1180,31 +1242,10 @@ async function toggleMicrophone() {
 }
 
 function speak(text: string) {
-  if (silentMode.value || !synthesisAvailable.value) return;
-
-  voiceState.value = "speaking";
-  recognition?.stop();
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  const voices = window.speechSynthesis.getVoices();
-  // Голос выбирается по языку команд. Пользователь всегда может изменить
-  // системный голос в настройках macOS или Windows.
-  const voicePrefix = selectedCommandLanguage.value.speechCode.slice(0, 2).toLowerCase();
-  const matchingVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith(voicePrefix));
-  utterance.voice = matchingVoices[0] ?? null;
-  selectedVoiceName.value = utterance.voice?.name ?? selectedCommandLanguage.value.nativeName;
-  utterance.lang = selectedCommandLanguage.value.speechCode;
-  utterance.rate = 0.9;
-  utterance.pitch = 1.08;
-  utterance.volume = 0.92;
-  utterance.onend = () => {
-    voiceState.value = "idle";
-    if (microphonePermission.value === "granted") startRecognition();
-  };
-  utterance.onerror = () => {
-    voiceState.value = "error";
-  };
-  window.speechSynthesis.speak(utterance);
+  if (silentMode.value) return;
+  // Произвольный ответ остаётся видимым в чате, а голосовой пакет отвечает
+  // уместной готовой репликой. Системный «старый» голос больше не используется.
+  void playPrivateVoice(voiceReactionFor(text), false);
 }
 
 async function testVoice() {
@@ -1398,13 +1439,19 @@ onMounted(async () => {
   saveCommandLanguage();
   await loadEnvironment();
   await loadPrivateVoiceCatalog();
-  void playPrivateVoice("startup");
   await loadLlmStatus();
   configureRecognition();
+  if (privateVoiceCatalog.value) {
+    synthesisAvailable.value = true;
+    selectedVoiceName.value = "Локальный пакет voice.mp3";
+  }
   await refreshProcessMetrics();
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
   // позволяют заметить устойчивый рост памяти во время долгой работы.
   memoryTimer = window.setInterval(refreshProcessMetrics, 5_000);
+  // Сначала произносим приветствие, затем включаем микрофон. Так голос самого
+  // C-3PO гарантированно не попадёт обратно в распознавание как команда.
+  await playPrivateVoice("startup", true, true);
   await inspectMicrophonePermission();
 });
 

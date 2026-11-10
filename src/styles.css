@@ -1543,6 +1543,87 @@ button:disabled {
   background: #292a24;
 }
 
+/* R2-D2 появляется прямо в истории: это реплика C-3PO, а не отдельное окно. */
+.r2-chat-bubble {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: min(86%, 430px);
+  min-height: 116px;
+  overflow: hidden;
+  padding: 10px 14px 10px 8px;
+  border: 1px solid rgba(93, 197, 208, 0.42);
+  border-radius: 4px 16px 16px 16px;
+  color: #dffcff;
+  background:
+    linear-gradient(rgba(80, 198, 210, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(80, 198, 210, 0.06) 1px, transparent 1px),
+    radial-gradient(circle at 18% 50%, rgba(47, 172, 187, 0.24), transparent 38%),
+    rgba(16, 27, 28, 0.96);
+  background-size: 18px 18px, 18px 18px, auto, auto;
+  box-shadow: inset 0 0 34px rgba(50, 179, 193, 0.08), 0 10px 28px rgba(0, 0, 0, 0.16);
+  animation: r2-panel-in 180ms ease-out;
+}
+
+.r2-chat-visual {
+  position: relative;
+  width: 76px;
+  height: 102px;
+  overflow: hidden;
+}
+
+.r2-chat-bubble .r2-hologram {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 190px;
+  height: 240px;
+  margin: 0;
+  transform: translate(-50%, -50%) scale(0.4);
+  transform-origin: center;
+}
+
+.r2-chat-copy {
+  min-width: 0;
+}
+
+.r2-chat-copy > span,
+.r2-chat-copy > strong,
+.r2-chat-copy > small {
+  display: block;
+}
+
+.r2-chat-copy > span {
+  color: #75dce5;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.13em;
+}
+
+.r2-chat-copy > strong {
+  margin-top: 5px;
+  color: #effeff;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.r2-chat-copy > small {
+  margin-top: 5px;
+  color: rgba(215, 250, 253, 0.68);
+  font-size: 10px;
+}
+
+.r2-chat-copy .r2-data-line {
+  height: 14px;
+  margin-top: 7px;
+}
+
+.r2-chat-copy .r2-data-line i {
+  width: 3px;
+  animation-duration: 0.48s;
+}
+
 .drawer-composer {
   position: relative;
   display: flex;

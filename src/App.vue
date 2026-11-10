@@ -542,6 +542,11 @@ const conversation = ref<HTMLElement | null>(null);
 watch([chatOpen, conversationListOpen, activeConversationId], ([isOpen, listIsOpen]) => {
   if (isOpen && !listIsOpen) void scrollChat("auto");
 }, { flush: "post" });
+watch(isConsultingR2, (isActive) => {
+  // Временная реплика R2-D2 является частью диалога, поэтому при её появлении
+  // прокручиваем историю вниз так же, как для обычного нового сообщения.
+  if (isActive && chatOpen.value && !conversationListOpen.value) void scrollChat("smooth");
+}, { flush: "post" });
 const lastError = ref<AppError | null>(null);
 const recentLogs = ref<string[]>([]);
 const logPath = ref("");
@@ -2143,25 +2148,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="isConsultingR2" class="r2-consultation" aria-live="polite">
-          <div class="r2-hologram" aria-hidden="true">
-            <span class="r2-orbit orbit-a"></span>
-            <span class="r2-orbit orbit-b"></span>
-            <div class="r2-unit">
-              <div class="r2-dome"><i></i><b></b></div>
-              <div class="r2-body"><i></i><i></i><i></i></div>
-              <span class="r2-leg leg-left"></span>
-              <span class="r2-leg leg-right"></span>
-            </div>
-            <div class="r2-beam"></div>
-          </div>
-          <div class="r2-consultation-copy">
-            <span>{{ selectedDroidName === "Автовыбор" ? "DROID AUTO" : selectedDroidName }} · LOCAL CORE</span>
-            <strong>{{ lastCommand }}</strong>
-            <div class="r2-data-line"><i v-for="index in 12" :key="index"></i></div>
-          </div>
-        </div>
-
         <div class="voice-copy">
           <span class="eyebrow">{{ t("voiceMode") }}</span>
           <h1>{{ voiceStatus }}</h1>
@@ -2327,6 +2313,30 @@ onBeforeUnmount(() => {
           <div v-for="message in messages" :key="message.id" class="drawer-message" :class="message.role">
             <span v-if="message.role === 'assistant'" class="small-avatar">C</span>
             <p>{{ message.text }}</p>
+          </div>
+          <div v-if="isConsultingR2" class="drawer-message assistant r2-chat-message" aria-live="polite">
+            <span class="small-avatar">C</span>
+            <div class="r2-chat-bubble">
+              <div class="r2-chat-visual" aria-hidden="true">
+                <div class="r2-hologram">
+                  <span class="r2-orbit orbit-a"></span>
+                  <span class="r2-orbit orbit-b"></span>
+                  <div class="r2-unit">
+                    <div class="r2-dome"><i></i><b></b></div>
+                    <div class="r2-body"><i></i><i></i><i></i></div>
+                    <span class="r2-leg leg-left"></span>
+                    <span class="r2-leg leg-right"></span>
+                  </div>
+                  <div class="r2-beam"></div>
+                </div>
+              </div>
+              <div class="r2-chat-copy">
+                <span>C-3PO ↔ R2-D2</span>
+                <strong>Минутку, я советуюсь с R2-D2…</strong>
+                <small>R2-D2: бип-буп · анализирую запрос</small>
+                <div class="r2-data-line" aria-hidden="true"><i v-for="index in 12" :key="index"></i></div>
+              </div>
+            </div>
           </div>
         </div>
 

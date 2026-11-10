@@ -419,6 +419,7 @@ pub fn run() {
             get_saved_microphone_approval,
             set_saved_microphone_approval,
             llm::get_llm_status,
+            llm::install_recommended_models,
             llm::get_llm_runtime_status,
             llm::start_llm,
             llm::stop_llm,

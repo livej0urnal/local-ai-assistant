@@ -97,6 +97,13 @@ type LocalReply = {
   task?: string;
 };
 
+type ModelInstallReport = {
+  installed: string[];
+  skipped: string[];
+  downloadedBytes: number;
+  message: string;
+};
+
 type PrivateVoicePhrase = {
   id: string;
   category: "startup" | "success" | "warning" | "error" | "waiting" | "introduction" | "shutdown" | "general";
@@ -563,6 +570,7 @@ const llmLoading = ref(false);
 const llmRuntime = ref<LlmRuntimeStatus | null>(null);
 const ttsStatus = ref<TtsStatus | null>(null);
 const llmTestReply = ref("");
+const modelInstallMessage = ref("");
 const modelPreference = ref(window.localStorage.getItem("c3po.model-preference") || "auto");
 const privateVoiceCatalog = ref<PrivateVoiceCatalog | null>(null);
 
@@ -865,6 +873,30 @@ async function loadLlmStatus() {
     await writeLog("error", "llm.status", `${details.name}: ${details.message}`);
   } finally {
     llmLoading.value = false;
+  }
+}
+
+async function installRecommendedModels() {
+  if (!("__TAURI_INTERNALS__" in window) || llmLoading.value) return;
+  llmLoading.value = true;
+  modelInstallMessage.value = "Скачиваю три модели (около 5,7 ГБ). Не закрывайте C-3PO…";
+  try {
+    const report = await invoke<ModelInstallReport>("install_recommended_models");
+    modelInstallMessage.value = report.installed.length
+      ? `${report.message}. Загружено: ${formatBytes(report.downloadedBytes)}.`
+      : "Все рекомендованные модели уже установлены.";
+    await writeLog("info", "llm.install", report.message, {
+      installed: report.installed,
+      skipped: report.skipped,
+      downloadedBytes: report.downloadedBytes,
+    });
+  } catch (error) {
+    const details = errorDetails(error);
+    modelInstallMessage.value = `Установка не завершена: ${details.message}`;
+    await writeLog("error", "llm.install", `${details.name}: ${details.message}`);
+  } finally {
+    llmLoading.value = false;
+    await loadLlmStatus();
   }
 }
 
@@ -2702,6 +2734,13 @@ onBeforeUnmount(() => {
 
         <div class="model-actions">
           <button type="button" :disabled="llmLoading" @click="loadLlmStatus">Обновить</button>
+          <button
+            v-if="(llmStatus?.models?.filter((model) => model.validGguf).length || 0) < 3"
+            class="model-primary-action"
+            type="button"
+            :disabled="llmLoading"
+            @click="installRecommendedModels"
+          >{{ llmLoading ? "Устанавливаю…" : "Установить 3 модели · ~5,7 ГБ" }}</button>
           <button v-if="llmRuntime?.ready" type="button" :disabled="llmLoading" @click="stopLocalModel">
             Остановить
           </button>
@@ -2721,6 +2760,7 @@ onBeforeUnmount(() => {
             @click="testLocalModel"
           >Тестовый вопрос</button>
         </div>
+        <p v-if="modelInstallMessage" class="model-install-message">{{ modelInstallMessage }}</p>
         <div v-if="llmTestReply" class="model-test-reply">
           <span>Ответ, подготовленный для C-3PO</span>
           <p>{{ llmTestReply }}</p>

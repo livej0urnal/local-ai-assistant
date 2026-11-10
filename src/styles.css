@@ -847,6 +847,17 @@ button:disabled {
   animation: fade-in 150ms ease-out;
 }
 
+.model-install-message {
+  margin: 0 24px 18px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--gold) 34%, var(--line));
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--gold-soft);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .chat-drawer {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;

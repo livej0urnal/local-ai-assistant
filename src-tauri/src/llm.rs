@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{
     env,
     fs::{self, File, OpenOptions},
-    io::Read,
+    io::{self, Read},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -76,6 +76,35 @@ pub(crate) struct LocalReply {
     model: String,
     task: String,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelInstallReport {
+    installed: Vec<String>,
+    skipped: Vec<String>,
+    downloaded_bytes: u64,
+    message: String,
+}
+
+struct RecommendedModel {
+    file_name: &'static str,
+    url: &'static str,
+}
+
+const RECOMMENDED_MODELS: &[RecommendedModel] = &[
+    RecommendedModel {
+        file_name: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    },
+    RecommendedModel {
+        file_name: "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+    },
+    RecommendedModel {
+        file_name: "Qwen3-4B-Q4_K_M.gguf",
+        url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
+    },
+];
 
 fn model_directory() -> Result<PathBuf, String> {
     let project_dirs = ProjectDirs::from("com", "igorfilippov", "C-3PO")
@@ -154,6 +183,68 @@ fn has_gguf_header(path: &Path) -> bool {
     };
     let mut header = [0_u8; 4];
     file.read_exact(&mut header).is_ok() && &header == b"GGUF"
+}
+
+fn install_recommended_models_blocking() -> Result<ModelInstallReport, String> {
+    let directory = model_directory()?;
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(60 * 45)))
+        .build()
+        .new_agent();
+    let mut installed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut downloaded_bytes = 0_u64;
+
+    for model in RECOMMENDED_MODELS {
+        let destination = directory.join(model.file_name);
+        if has_gguf_header(&destination) {
+            skipped.push(model.file_name.to_string());
+            continue;
+        }
+
+        let partial = directory.join(format!("{}.part", model.file_name));
+        let _ = fs::remove_file(&partial);
+        let mut response = agent
+            .get(model.url)
+            .header("User-Agent", "C-3PO-local-assistant/0.1")
+            .call()
+            .map_err(|error| format!("Не удалось скачать {}: {error}", model.file_name))?;
+        let mut output = File::create(&partial)
+            .map_err(|error| format!("Не удалось создать {}: {error}", partial.display()))?;
+        let bytes = io::copy(&mut response.body_mut().as_reader(), &mut output)
+            .map_err(|error| format!("Загрузка {} прервана: {error}", model.file_name))?;
+        drop(output);
+
+        if bytes < 100_000_000 || !has_gguf_header(&partial) {
+            let _ = fs::remove_file(&partial);
+            return Err(format!(
+                "Файл {} не прошёл проверку GGUF. Повторите установку.",
+                model.file_name
+            ));
+        }
+        if destination.exists() {
+            fs::remove_file(&destination).map_err(|error| error.to_string())?;
+        }
+        fs::rename(&partial, &destination).map_err(|error| {
+            format!("Не удалось завершить установку {}: {error}", model.file_name)
+        })?;
+        downloaded_bytes += bytes;
+        installed.push(model.file_name.to_string());
+    }
+
+    Ok(ModelInstallReport {
+        installed,
+        skipped,
+        downloaded_bytes,
+        message: "Набор R2-D2, BB-8 и K-2SO готов к локальной работе".to_string(),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn install_recommended_models() -> Result<ModelInstallReport, String> {
+    tauri::async_runtime::spawn_blocking(install_recommended_models_blocking)
+        .await
+        .map_err(|error| format!("Установка моделей неожиданно остановилась: {error}"))?
 }
 
 fn discover_models(directory: &Path) -> Result<Vec<LocalModelFile>, String> {

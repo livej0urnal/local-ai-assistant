@@ -26,13 +26,14 @@ MAX_TEXT_LENGTH = 1_200
 
 model = None
 engine_name: str | None = None
+voice_conditionals = None
 model_error: str | None = None
 model_lock = threading.Lock()
 
 
 def load_model():
     """Load the large model once and prefer Apple/Windows GPU acceleration."""
-    global model, model_error, engine_name
+    global model, model_error, engine_name, voice_conditionals
     if model is not None:
         return model
     with model_lock:
@@ -47,6 +48,9 @@ def load_model():
 
                     print("Loading Chatterbox Multilingual v3 on MLX", flush=True)
                     model = load_mlx_model("mlx-community/chatterbox-multilingual-v3")
+                    # Голосовой отпечаток не зависит от текста. Вычисляем его
+                    # один раз вместо повторной обработки reference.wav.
+                    voice_conditionals = model.prepare_conditionals(str(REFERENCE), 0, exaggeration=0.1)
                     engine_name = "mlx"
                     model_error = None
                     print("MLX Chatterbox is ready", flush=True)
@@ -159,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
 
                         results = list(tts.generate(
                             text=text,
-                            ref_audio=str(REFERENCE),
+                            conds=voice_conditionals,
                             lang_code=language,
                             verbose=False,
                         ))
@@ -201,7 +205,18 @@ if __name__ == "__main__":
     # весов с диска. Если прогрев завершится ошибкой, POST вернёт её в журнал.
     def warm_up():
         try:
-            load_model()
+            tts = load_model()
+            if engine_name == "mlx":
+                # Первый короткий проход компилирует Metal-графы в фоне. Без
+                # него цена компиляции попадёт в первый ответ пользователя.
+                with model_lock:
+                    list(tts.generate(
+                        text="Готов.",
+                        conds=voice_conditionals,
+                        lang_code="ru",
+                        verbose=False,
+                    ))
+                print("MLX voice graph is warmed up", flush=True)
         except Exception as error:
             print(f"Warm-up failed: {type(error).__name__}: {error}", flush=True)
 

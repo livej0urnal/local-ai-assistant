@@ -10,6 +10,7 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
+use sysinfo::{Pid, System};
 use tauri::State;
 
 const LLAMA_HOST: &str = "127.0.0.1";
@@ -58,6 +59,7 @@ pub(crate) struct LlmRuntimeStatus {
     state: String,
     ready: bool,
     process_id: Option<u32>,
+    resident_memory_bytes: u64,
     address: String,
     message: String,
 }
@@ -214,6 +216,14 @@ fn runtime_status(runtime: &LlmRuntime) -> Result<LlmRuntimeStatus, String> {
     }
 
     let ready = process_id.is_some() && server_is_ready();
+    let resident_memory_bytes = process_id
+        .and_then(|pid| {
+            System::new_all()
+                .ok()?
+                .process(Pid::from_u32(pid))
+                .map(|process| process.memory())
+        })
+        .unwrap_or(0);
     let (state, message) = if ready {
         ("ready", "Локальная модель загружена и готова отвечать.")
     } else if process_id.is_some() {
@@ -226,6 +236,7 @@ fn runtime_status(runtime: &LlmRuntime) -> Result<LlmRuntimeStatus, String> {
         state: state.to_string(),
         ready,
         process_id,
+        resident_memory_bytes,
         address: format!("http://{LLAMA_HOST}:{LLAMA_PORT}"),
         message: message.to_string(),
     })
@@ -370,7 +381,7 @@ pub(crate) fn generate_local_reply(
         "messages": [
             {
                 "role": "system",
-                "content": "Ты R2-D2 — локальный аналитический модуль внутри компьютерного помощника C-3PO. Отвечай по-русски, кратко и честно. C-3PO передаёт твой ответ пользователю. Не утверждай, что выполнил действие на компьютере: ты только анализируешь запрос, а системные действия отдельно проверяет Rust."
+                "content": "Ты — внутренний аналитический модуль R2-D2 внутри локального компьютерного помощника C-3PO. Пользователь разговаривает с C-3PO, а не с тобой. Подготовь краткий, полезный и честный ответ по-русски, написанный от лица C-3PO. Никогда не представляйся, не называй C-3PO своим помощником и не начинай ответ словами «R2-D2 сообщает». Не утверждай, что действие на компьютере уже выполнено: ты только анализируешь запрос, а системные действия отдельно проверяет Rust."
             },
             { "role": "user", "content": prompt }
         ],

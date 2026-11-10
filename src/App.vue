@@ -46,6 +46,7 @@ type LlmRuntimeStatus = {
   state: "stopped" | "loading" | "ready";
   ready: boolean;
   processId: number | null;
+  residentMemoryBytes: number;
   address: string;
   message: string;
 };
@@ -147,11 +148,25 @@ const llmTestReply = ref("");
 let recognition: RecognitionLike | null = null;
 let microphoneStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
+let droidAudioContext: AudioContext | null = null;
 let meterFrame = 0;
 let restartTimer = 0;
 let shouldListen = false;
 let memoryTimer = 0;
 let voiceDemoIndex = 0;
+const microphonePermissionStorageKey = "c3po.microphone-permission";
+
+function savedMicrophonePermission(): PermissionState | null {
+  const value = window.localStorage.getItem(microphonePermissionStorageKey);
+  return value === "granted" || value === "denied" || value === "prompt" ? value : null;
+}
+
+function rememberMicrophonePermission(state: PermissionState) {
+  microphonePermission.value = state;
+  if (state === "granted" || state === "denied" || state === "prompt") {
+    window.localStorage.setItem(microphonePermissionStorageKey, state);
+  }
+}
 
 const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
 const systemLabel = computed(() => {
@@ -276,23 +291,61 @@ async function stopLocalModel() {
   if (!("__TAURI_INTERNALS__" in window)) return;
   llmRuntime.value = await invoke<LlmRuntimeStatus>("stop_llm");
   llmTestReply.value = moviePhrase("shutdown");
+  void playR2D2Signal("shutdown");
   await refreshProcessMetrics();
+}
+
+type R2D2Mood = "thinking" | "success" | "error" | "shutdown";
+
+async function playR2D2Signal(mood: R2D2Mood) {
+  // Это оригинальные процедурно созданные сигналы, а не аудиофрагменты фильма.
+  // Позже этот слой можно заменить лицензированным звуковым пакетом.
+  droidAudioContext ??= new AudioContext();
+  if (droidAudioContext.state === "suspended") await droidAudioContext.resume();
+
+  const patterns: Record<R2D2Mood, Array<[number, number, number]>> = {
+    thinking: [[720, 0.07, 980], [1040, 0.06, 820], [620, 0.09, 1320], [1180, 0.05, 900]],
+    success: [[680, 0.06, 940], [940, 0.07, 1320], [1240, 0.1, 1580]],
+    error: [[940, 0.08, 520], [560, 0.1, 340], [760, 0.07, 420]],
+    shutdown: [[1100, 0.07, 760], [720, 0.09, 480], [440, 0.14, 220]],
+  };
+
+  let cursor = droidAudioContext.currentTime + 0.02;
+  for (const [startFrequency, duration, endFrequency] of patterns[mood]) {
+    const oscillator = droidAudioContext.createOscillator();
+    const gain = droidAudioContext.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(startFrequency, cursor);
+    oscillator.frequency.exponentialRampToValueAtTime(endFrequency, cursor + duration);
+    gain.gain.setValueAtTime(0.0001, cursor);
+    gain.gain.exponentialRampToValueAtTime(0.12, cursor + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, cursor + duration);
+    oscillator.connect(gain);
+    gain.connect(droidAudioContext.destination);
+    oscillator.start(cursor);
+    oscillator.stop(cursor + duration + 0.01);
+    cursor += duration + 0.035;
+  }
 }
 
 async function askLocalModel(prompt: string, showInConversation = true) {
   isWorking.value = true;
   voiceState.value = "thinking";
+  lastCommand.value = "Минутку, я советуюсь с R2-D2…";
   try {
+    await playR2D2Signal("thinking");
     if (!llmRuntime.value?.ready && !(await startLocalModel())) {
       throw new Error("Локальная модель не запустилась");
     }
     const reply = await invoke<LocalReply>("generate_local_reply", { prompt });
     llmTestReply.value = reply.text;
     lastCommand.value = reply.text;
+    await playR2D2Signal("success");
     if (showInConversation) addMessage("assistant", reply.text);
     speak(reply.text);
     return reply.text;
   } catch (error) {
+    await playR2D2Signal("error");
     const details = errorDetails(error);
     const message = `Локальная модель не ответила: ${details.message}`;
     llmTestReply.value = message;
@@ -306,8 +359,8 @@ async function askLocalModel(prompt: string, showInConversation = true) {
 }
 
 async function testLocalModel() {
-  llmTestReply.value = "Запускаю модель и готовлю ответ…";
-  await askLocalModel("Коротко представься как R2-D2 и скажи, что работаешь полностью локально.", false);
+  llmTestReply.value = "C-3PO советуется с R2-D2…";
+  await askLocalModel("Коротко поприветствуй пользователя от лица C-3PO и объясни, что размышления выполняются локально.", false);
 }
 
 async function openLlmPanel() {
@@ -596,7 +649,7 @@ async function requestMicrophone() {
         autoGainControl: true,
       },
     });
-    microphonePermission.value = "granted";
+    rememberMicrophonePermission("granted");
     microphoneActive.value = true;
     onboardingOpen.value = false;
     await countMicrophones();
@@ -615,7 +668,8 @@ async function requestMicrophone() {
   } catch (error) {
     const details = errorDetails(error);
     lastError.value = microphoneErrorDescription(error);
-    microphonePermission.value = details.name === "NotAllowedError" ? "denied" : "unsupported";
+    if (details.name === "NotAllowedError") rememberMicrophonePermission("denied");
+    else microphonePermission.value = "unsupported";
     voiceState.value = "error";
     onboardingOpen.value = false;
     await writeLog("error", "microphone.request", `${details.name}: ${details.message}`, {
@@ -635,21 +689,33 @@ async function inspectMicrophonePermission() {
     return;
   }
 
+  let permissionWasReadFromSystem = false;
   try {
     const status = await navigator.permissions.query({ name: "microphone" as PermissionName });
-    microphonePermission.value = status.state;
+    permissionWasReadFromSystem = true;
+    rememberMicrophonePermission(status.state);
     status.onchange = () => {
-      microphonePermission.value = status.state;
+      rememberMicrophonePermission(status.state);
       if (status.state === "granted") void requestMicrophone();
     };
   } catch (error) {
-    microphonePermission.value = "prompt";
+    // WKWebView не всегда поддерживает Permissions API для микрофона. В этом
+    // случае восстанавливаем последнее подтверждённое состояние интерфейса.
+    microphonePermission.value = savedMicrophonePermission() ?? "prompt";
     const details = errorDetails(error);
     await writeLog("warn", "microphone.permission-check", `${details.name}: ${details.message}`);
   }
 
-  if (microphonePermission.value === "granted") await requestMicrophone();
-  else onboardingOpen.value = true;
+  if (microphonePermission.value === "granted") {
+    // Повторный getUserMedia не показывает системное окно, если macOS сохранила
+    // доступ. Если право было отозвано, catch синхронизирует интерфейс обратно.
+    await requestMicrophone();
+  } else {
+    onboardingOpen.value = microphonePermission.value === "prompt";
+    if (!permissionWasReadFromSystem && microphonePermission.value === "denied") {
+      await writeLog("info", "microphone.permission-check", "Восстановлено сохранённое состояние: доступ запрещён");
+    }
+  }
 }
 
 function pauseMicrophone() {
@@ -834,6 +900,7 @@ onBeforeUnmount(() => {
   pauseMicrophone();
   window.speechSynthesis?.cancel();
   audioContext?.close();
+  droidAudioContext?.close();
 });
 </script>
 
@@ -1130,7 +1197,12 @@ onBeforeUnmount(() => {
             <span>4</span>
             <div>
               <strong>Состояние процесса</strong>
-              <small>{{ llmRuntime?.message || "Модель ещё не запускалась" }}</small>
+              <small>
+                {{ llmRuntime?.message || "Модель ещё не запускалась" }}
+                <template v-if="llmRuntime?.processId">
+                  · PID {{ llmRuntime.processId }} · RAM {{ formatBytes(llmRuntime.residentMemoryBytes) }}
+                </template>
+              </small>
             </div>
             <b :class="llmRuntime?.ready ? 'ready' : ''">{{ llmRuntime?.state || "остановлена" }}</b>
           </article>
@@ -1164,7 +1236,7 @@ onBeforeUnmount(() => {
           >Тестовый вопрос</button>
         </div>
         <div v-if="llmTestReply" class="model-test-reply">
-          <span>Ответ R2-D2</span>
+          <span>Ответ, подготовленный для C-3PO</span>
           <p>{{ llmTestReply }}</p>
         </div>
       </section>

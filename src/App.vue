@@ -984,6 +984,7 @@ async function playR2D2Signal(mood: R2D2Mood) {
 }
 
 async function askLocalModel(prompt: string, showInConversation = true, toolContext: string | null = null) {
+  const consultationStartedAt = performance.now();
   isWorking.value = true;
   isConsultingR2.value = true;
   voiceState.value = "thinking";
@@ -1032,6 +1033,12 @@ async function askLocalModel(prompt: string, showInConversation = true, toolCont
     await writeLog("error", "llm.generate", `${details.name}: ${details.message}`);
     return "";
   } finally {
+    // Даже быстрый ответ или ошибка не должны превращать появление R2-D2 в
+    // незаметную вспышку. В открытом диалоге сцена держится минимум 1,5 с.
+    if (chatOpen.value) {
+      const remaining = 1_500 - (performance.now() - consultationStartedAt);
+      if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+    }
     isConsultingR2.value = false;
     isWorking.value = false;
     // Если синтез речи недоступен или включён тихий режим, speak() не меняет
@@ -2479,8 +2486,8 @@ onBeforeUnmount(() => {
               </div>
               <div class="r2-chat-copy">
                 <span>C-3PO ↔ R2-D2</span>
-                <strong>Минутку, я советуюсь с R2-D2…</strong>
-                <small>R2-D2: бип-буп · анализирую запрос</small>
+                <strong>R2-D2 подключён · идёт разговор с C-3PO</strong>
+                <small>R2-D2: бип-буп · анализирую запрос и готовлю ответ</small>
                 <div class="r2-data-line" aria-hidden="true"><i v-for="index in 12" :key="index"></i></div>
               </div>
             </div>

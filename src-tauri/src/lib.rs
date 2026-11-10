@@ -331,6 +331,19 @@ fn show_main_window(app: tauri::AppHandle) {
     reveal_main_window(&app);
 }
 
+fn quit_application(app: &tauri::AppHandle) {
+    // Закрытие через меню должно завершать не только окно, но и оба фоновых
+    // процесса. Обычный крестик по-прежнему лишь скрывает помощника.
+    let _ = llm::stop_llm(app.state::<llm::LlmRuntime>());
+    let _ = tts::stop_tts(app.state::<tts::TtsRuntime>());
+    append_native_log(
+        "info",
+        "rust.application",
+        "C-3PO полностью завершён через меню строки состояния",
+    );
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -371,7 +384,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => reveal_main_window(app),
-                    "quit" => app.exit(0),
+                    "quit" => quit_application(app),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {

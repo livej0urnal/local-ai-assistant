@@ -17,20 +17,23 @@ jobs:
         include:
           - platform: macos-15
             target: aarch64-apple-darwin
+            bundles: dmg
           - platform: macos-15-intel
             target: x86_64-apple-darwin
+            bundles: dmg
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: nsis
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           repository: ggml-org/llama.cpp
           ref: b12248
           path: vendor/llama.cpp
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -61,4 +64,4 @@ jobs:
             Personal voice samples and personal data are never included.
           releaseDraft: false
           prerelease: false
-          args: "--target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json"
+          args: "--target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json"

@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 1420",
+    "dev": "vite",
+    "dev:ensure": "node scripts/ensure-vite.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "desktop": "tauri dev",

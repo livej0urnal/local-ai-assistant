@@ -7,7 +7,7 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use sysinfo::System;
+use sysinfo::{System, get_current_pid};
 use tauri::webview::{PermissionKind, PermissionResponse};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -20,6 +20,15 @@ struct SystemInfo {
     host_name: String,
     architecture: String,
     total_memory_mb: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessMetrics {
+    pid: u32,
+    resident_memory_bytes: u64,
+    virtual_memory_bytes: u64,
+    captured_at_unix_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,11 +168,40 @@ fn collect_system_info() -> Result<SystemInfo, String> {
     system.refresh_all();
 
     Ok(SystemInfo {
-        operating_system: System::name().unwrap_or_else(|_| "Unknown".to_string()),
+        // На macOS `System::name()` возвращает техническое имя ядра `Darwin`.
+        // Пользователю нужен привычный бренд операционной системы.
+        operating_system: match std::env::consts::OS {
+            "macos" => "macOS".to_string(),
+            "windows" => "Windows".to_string(),
+            "linux" => System::distribution_id(),
+            _ => System::name().unwrap_or_else(|_| std::env::consts::OS.to_string()),
+        },
         os_version: System::os_version().unwrap_or_else(|_| "Unknown".to_string()),
         host_name: System::host_name().unwrap_or_else(|_| "Unknown".to_string()),
         architecture: System::cpu_arch(),
         total_memory_mb: system.total_memory() / 1024 / 1024,
+    })
+}
+
+fn collect_process_metrics() -> Result<ProcessMetrics, String> {
+    let pid = get_current_pid().map_err(|error| error.to_string())?;
+    let system = System::new_all().map_err(|error| error.to_string())?;
+    let process = system
+        .process(pid)
+        .ok_or_else(|| "Не удалось найти процесс C-3PO".to_string())?;
+
+    Ok(ProcessMetrics {
+        pid: pid.as_u32(),
+        // RSS — физическая память, действительно находящаяся в ОЗУ сейчас.
+        // Это главный показатель для наблюдения за возможной утечкой памяти.
+        resident_memory_bytes: process.memory(),
+        // Виртуальная память сохраняется для диагностики, но на macOS может
+        // быть огромной из-за особенностей адресного пространства WebKit.
+        virtual_memory_bytes: process.virtual_memory(),
+        captured_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default(),
     })
 }
 
@@ -219,6 +257,11 @@ fn get_environment_report() -> Result<EnvironmentReport, String> {
     })
 }
 
+#[tauri::command]
+fn get_process_metrics() -> Result<ProcessMetrics, String> {
+    collect_process_metrics()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -246,6 +289,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_system_info,
             get_environment_report,
+            get_process_metrics,
             log_client_event,
             get_recent_logs,
             get_log_path
@@ -279,5 +323,13 @@ mod tests {
                 .iter()
                 .any(|item| item.id == "microphone")
         );
+    }
+
+    #[test]
+    fn current_process_memory_is_available() {
+        let metrics = collect_process_metrics().expect("process metrics should be available");
+
+        assert!(metrics.pid > 0);
+        assert!(metrics.resident_memory_bytes > 0);
     }
 }

@@ -17,6 +17,13 @@ type SystemInfo = {
   totalMemoryMb: number;
 };
 
+type ProcessMetrics = {
+  pid: number;
+  residentMemoryBytes: number;
+  virtualMemoryBytes: number;
+  capturedAtUnixMs: number;
+};
+
 type NativeCapability = {
   id: string;
   available: boolean;
@@ -94,6 +101,9 @@ const lastError = ref<AppError | null>(null);
 const recentLogs = ref<string[]>([]);
 const logPath = ref("");
 const logsLoading = ref(false);
+const processMetrics = ref<ProcessMetrics | null>(null);
+const memoryBaselineBytes = ref(0);
+const memoryPeakBytes = ref(0);
 
 let recognition: RecognitionLike | null = null;
 let microphoneStream: MediaStream | null = null;
@@ -101,6 +111,7 @@ let audioContext: AudioContext | null = null;
 let meterFrame = 0;
 let restartTimer = 0;
 let shouldListen = false;
+let memoryTimer = 0;
 
 const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
 const systemLabel = computed(() => {
@@ -132,6 +143,33 @@ const microphoneLabel = computed(() => {
   return labels[microphonePermission.value];
 });
 const canPauseMicrophone = computed(() => microphoneActive.value || voiceState.value === "speaking");
+const processMemoryLabel = computed(() => formatBytes(processMetrics.value?.residentMemoryBytes ?? 0));
+const processMemoryDelta = computed(() => {
+  if (!processMetrics.value || !memoryBaselineBytes.value) return "—";
+  const delta = processMetrics.value.residentMemoryBytes - memoryBaselineBytes.value;
+  const sign = delta > 0 ? "+" : "";
+  return `${sign}${formatBytes(delta)}`;
+});
+
+function formatBytes(bytes: number) {
+  const absolute = Math.abs(bytes);
+  if (absolute < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} КБ`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+}
+
+async function refreshProcessMetrics() {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+
+  try {
+    const metrics = await invoke<ProcessMetrics>("get_process_metrics");
+    processMetrics.value = metrics;
+    if (!memoryBaselineBytes.value) memoryBaselineBytes.value = metrics.residentMemoryBytes;
+    memoryPeakBytes.value = Math.max(memoryPeakBytes.value, metrics.residentMemoryBytes);
+  } catch (error) {
+    const details = errorDetails(error);
+    await writeLog("warn", "process.metrics", `${details.name}: ${details.message}`);
+  }
+}
 
 function errorDetails(error: unknown) {
   if (error instanceof DOMException || error instanceof Error) {
@@ -510,7 +548,11 @@ async function approveAction() {
 
     pendingAction.value = false;
     const memory = info.totalMemoryMb > 0 ? `${Math.round(info.totalMemoryMb / 1024)} ГБ памяти` : "объём памяти не определён";
-    const response = `${info.operatingSystem} ${info.osVersion}, архитектура ${info.architecture}, ${memory}.`;
+    await refreshProcessMetrics();
+    const applicationMemory = processMetrics.value
+      ? `C-3PO сейчас использует ${processMemoryLabel.value} оперативной памяти`
+      : "расход памяти C-3PO определить не удалось";
+    const response = `${info.operatingSystem} ${info.osVersion}, архитектура ${info.architecture}, всего ${memory}. ${applicationMemory}.`;
     addMessage("assistant", response);
     lastCommand.value = response;
     speak(response);
@@ -577,10 +619,15 @@ function permissionStatus(id: string) {
 onMounted(async () => {
   configureRecognition();
   await loadEnvironment();
+  await refreshProcessMetrics();
+  // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
+  // позволяют заметить устойчивый рост памяти во время долгой работы.
+  memoryTimer = window.setInterval(refreshProcessMetrics, 5_000);
   await inspectMicrophonePermission();
 });
 
 onBeforeUnmount(() => {
+  window.clearInterval(memoryTimer);
   pauseMicrophone();
   window.speechSynthesis?.cancel();
   audioContext?.close();
@@ -602,7 +649,9 @@ onBeforeUnmount(() => {
         <span class="status-light"></span>
         <div>
           <strong>{{ systemLabel }}</strong>
-          <span>{{ environment?.system.architecture || "Проверка архитектуры" }}</span>
+          <span>
+            {{ environment?.system.architecture || "Проверка архитектуры" }} · C-3PO {{ processMemoryLabel }} RAM
+          </span>
         </div>
       </div>
 
@@ -751,6 +800,11 @@ onBeforeUnmount(() => {
           <div><span>Операционная система</span><strong>{{ systemLabel }}</strong></div>
           <div><span>Архитектура</span><strong>{{ environment?.system.architecture || "—" }}</strong></div>
           <div><span>Компьютер</span><strong>{{ environment?.system.hostName || "—" }}</strong></div>
+          <div>
+            <span>Память C-3PO (RSS)</span>
+            <strong>{{ processMemoryLabel }}</strong>
+            <small>От открытия: {{ processMemoryDelta }} · пик {{ formatBytes(memoryPeakBytes) }}</small>
+          </div>
         </div>
 
         <div class="permission-list">

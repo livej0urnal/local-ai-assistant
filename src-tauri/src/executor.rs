@@ -69,6 +69,15 @@ fn canonical_application_name(value: &str) -> String {
     }
 }
 
+fn known_website(value: &str) -> Option<(&'static str, &'static str)> {
+    match normalize(value).as_str() {
+        "youtube" | "ютуб" => Some(("YouTube", "https://www.youtube.com")),
+        "gmail" | "гугл почта" => Some(("Gmail", "https://mail.google.com")),
+        "google" | "гугл" => Some(("Google", "https://www.google.com")),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn collect_macos_bundles(directory: &Path, depth: usize, paths: &mut BTreeSet<PathBuf>) {
     if depth == 0 {
@@ -140,6 +149,13 @@ fn dirs_home() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn launch_named_application(requested: &str) -> Result<String, String> {
+    if let Some((name, url)) = known_website(requested) {
+        Command::new("/usr/bin/open")
+            .arg(url)
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть {name}: {error}"))?;
+        return Ok(format!("{name} в браузере"));
+    }
     let requested = canonical_application_name(requested);
     if normalize(&requested) == "browser" || normalize(&requested) == "браузер" {
         Command::new("/usr/bin/open")
@@ -228,6 +244,13 @@ fn collect_windows_shortcuts(directory: &Path, depth: usize, result: &mut Vec<(S
 
 #[cfg(target_os = "windows")]
 fn launch_named_application(requested: &str) -> Result<String, String> {
+    if let Some((name, url)) = known_website(requested) {
+        Command::new("explorer.exe")
+            .arg(url)
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть {name}: {error}"))?;
+        return Ok(format!("{name} в браузере"));
+    }
     let requested = canonical_application_name(requested);
     let query = normalize(&requested);
     let mut applications = Vec::new();
@@ -508,6 +531,10 @@ mod tests {
         assert_eq!(
             canonical_application_name("неизвестная программа"),
             "неизвестная программа"
+        );
+        assert_eq!(
+            known_website("ютуб"),
+            Some(("YouTube", "https://www.youtube.com"))
         );
     }
 

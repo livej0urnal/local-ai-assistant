@@ -1940,6 +1940,110 @@ async function openKnownApplication(application: string) {
   }
 }
 
+function arithmeticExpressionFrom(text: string) {
+  const requested = text.match(/(?:посчитай|вычисли|сколько\s+будет|calculate)\s+(.+)$/iu)?.[1];
+  if (!requested) return null;
+  const normalized = requested
+    .replace(/(\d),(\d)/gu, "$1.$2")
+    .replace(/[×хx]/giu, "*")
+    .replace(/[÷:]/gu, "/")
+    .replace(/\b(?:плюс|plus)\b/giu, "+")
+    .replace(/\b(?:минус|minus)\b/giu, "-")
+    .replace(/\b(?:умножить\s+на|умножь\s+на|times)\b/giu, "*")
+    .replace(/\b(?:разделить\s+на|раздели\s+на|divided\s+by)\b/giu, "/")
+    .trim();
+  return /^[\d+\-*/().\s]+$/u.test(normalized) ? normalized : null;
+}
+
+function evaluateArithmetic(expression: string) {
+  let position = 0;
+  const skipSpaces = () => { while (/\s/u.test(expression[position] ?? "")) position += 1; };
+  const parseNumber = (): number => {
+    skipSpaces();
+    const start = position;
+    while (/[\d.]/u.test(expression[position] ?? "")) position += 1;
+    const value = Number(expression.slice(start, position));
+    if (!Number.isFinite(value) || start === position) throw new Error("Ожидалось число");
+    return value;
+  };
+  const parseFactor = (): number => {
+    skipSpaces();
+    if (expression[position] === "+") { position += 1; return parseFactor(); }
+    if (expression[position] === "-") { position += 1; return -parseFactor(); }
+    if (expression[position] === "(") {
+      position += 1;
+      const value = parseSum();
+      skipSpaces();
+      if (expression[position] !== ")") throw new Error("Не закрыта скобка");
+      position += 1;
+      return value;
+    }
+    return parseNumber();
+  };
+  const parseProduct = (): number => {
+    let value = parseFactor();
+    while (true) {
+      skipSpaces();
+      const operator = expression[position];
+      if (operator !== "*" && operator !== "/") return value;
+      position += 1;
+      const operand = parseFactor();
+      if (operator === "/" && operand === 0) throw new Error("На ноль делить нельзя");
+      value = operator === "*" ? value * operand : value / operand;
+    }
+  };
+  const parseSum = (): number => {
+    let value = parseProduct();
+    while (true) {
+      skipSpaces();
+      const operator = expression[position];
+      if (operator !== "+" && operator !== "-") return value;
+      position += 1;
+      const operand = parseProduct();
+      value = operator === "+" ? value + operand : value - operand;
+    }
+  };
+  const result = parseSum();
+  skipSpaces();
+  if (position !== expression.length || !Number.isFinite(result)) throw new Error("Некорректное выражение");
+  return result;
+}
+
+function answerCalculation(command: string) {
+  const expression = arithmeticExpressionFrom(command);
+  if (!expression) return false;
+  try {
+    const result = evaluateArithmetic(expression);
+    const formatted = new Intl.NumberFormat(selectedCommandLanguage.value.speechCode, {
+      maximumFractionDigits: 10,
+    }).format(result);
+    const response = `Результат: ${formatted}.`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+  } catch (error) {
+    const response = `Не удалось посчитать: ${errorDetails(error).message}.`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+  }
+  return true;
+}
+
+function parseOpenApplicationCommand(text: string) {
+  const requested = text.match(/^(?:открой|запусти|open|launch)\s+(?:приложение\s+|app\s+)?(.+?)\s*$/iu)?.[1];
+  if (!requested) return null;
+  // Составную фразу разбираем на цель и следующее действие. Без этого весь
+  // хвост ошибочно становился названием приложения.
+  const parts = requested.split(/\s+и\s+(?=(?:посчитай|вычисли|сколько\s+будет|calculate)\b)/iu, 2);
+  return { application: parts[0].trim(), followUp: parts[1]?.trim() || "" };
+}
+
+async function executeOpenApplicationCommand(application: string, followUp: string) {
+  await openKnownApplication(application);
+  if (followUp) answerCalculation(followUp);
+}
+
 async function answerWeatherQuestion(question: string, notifyInBackground: boolean) {
   isWorking.value = true;
   voiceState.value = "thinking";
@@ -2086,9 +2190,12 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
     speak(assistantPhrase("chatClosed"));
     return;
   }
-  const openApplication = text.match(/^(?:открой|запусти)\s+(?:приложение\s+)?(.+?)\s*$/iu)?.[1];
+  const openApplication = parseOpenApplicationCommand(text);
   if (openApplication) {
-    void openKnownApplication(openApplication);
+    void executeOpenApplicationCommand(openApplication.application, openApplication.followUp);
+    return;
+  }
+  if (answerCalculation(text)) {
     return;
   }
 

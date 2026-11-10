@@ -15,25 +15,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14
-            args: "--target aarch64-apple-darwin"
+          - platform: macos-15
+            target: aarch64-apple-darwin
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
           - platform: windows-latest
-            args: ""
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: b12248
+          path: vendor/llama.cpp
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
       - name: Install frontend dependencies
         run: npm ci
       - name: Test Rust core
         run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build bundled llama.cpp runtime
+        run: |
+          cmake -S vendor/llama.cpp -B vendor/llama.cpp/build -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+          cmake --build vendor/llama.cpp/build --config Release --target llama-server --parallel 2
+      - name: Stage llama-server sidecar
+        run: node scripts/stage-llama-sidecar.mjs ${{ matrix.target }}
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0
         env:
@@ -42,8 +55,10 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "C-3PO ${{ github.ref_name }}"
           releaseBody: |
-            Unsigned preview build for macOS Apple Silicon and Windows.
-            Voice samples, GGUF models and personal data are not included.
-          releaseDraft: true
-          prerelease: true
-          args: ${{ matrix.args }}
+            C-3PO for macOS Apple Silicon, macOS Intel and Windows x64.
+            The installer includes the llama.cpp runtime. On first launch, the model panel can download
+            the official R2-D2, BB-8 and K-2SO GGUF pack after explicit confirmation (~5.7 GB).
+            Personal voice samples and personal data are never included.
+          releaseDraft: false
+          prerelease: false
+          args: "--target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json"

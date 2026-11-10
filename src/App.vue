@@ -526,6 +526,8 @@ const messages = ref<Message[]>(initialConversation?.messages.length ? initialCo
 ]);
 const nextMessageId = ref(Math.max(1, ...messages.value.map((message) => message.id)) + 1);
 const input = ref("");
+const selectedFileContext = ref("");
+const selectedFileNames = ref<string[]>([]);
 const liveTranscript = ref("");
 const lastCommand = ref(initialProfile ? t("sayCommand") : introductionPrompt(commandLanguage.value));
 const pendingAction = ref<PendingAction | null>(null);
@@ -1904,7 +1906,7 @@ async function answerWeatherQuestion(question: string, notifyInBackground: boole
   }
 }
 
-function processVoiceCommand(text: string, notifyInBackground = false) {
+function processVoiceCommand(text: string, notifyInBackground = false, toolContext: string | null = null) {
   const normalized = text.toLowerCase();
   const localizedSystemCommand = commandText("systemCommand").toLowerCase();
   const localizedChatCommand = commandText("chatCommand").toLowerCase();
@@ -2004,7 +2006,7 @@ function processVoiceCommand(text: string, notifyInBackground = false) {
   }
 
   if (llmStatus.value?.state === "ready") {
-    void askLocalModel(text).then((reply) => {
+    void askLocalModel(text, true, toolContext).then((reply) => {
       if (notifyInBackground && reply) void notifyFromBackground(reply);
     });
     return;
@@ -2016,11 +2018,50 @@ function processVoiceCommand(text: string, notifyInBackground = false) {
   if (notifyInBackground) void notifyFromBackground(response);
 }
 
+async function selectFilesForAnalysis(event: Event) {
+  const inputElement = event.target as HTMLInputElement;
+  const files = Array.from(inputElement.files ?? []).slice(0, 10);
+  inputElement.value = "";
+  const allowedExtensions = new Set([
+    "txt", "md", "json", "csv", "log", "rs", "toml", "ts", "tsx", "js", "jsx", "vue", "css", "html", "py", "php", "sql", "yaml", "yml",
+  ]);
+  const accepted = files.filter((file) => {
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+    return allowedExtensions.has(extension) && file.size <= 1_000_000;
+  });
+  if (!accepted.length) {
+    lastCommand.value = "Выберите текстовые файлы размером до 1 МБ каждый.";
+    return;
+  }
+
+  let remainingCharacters = 1_700;
+  const fragments: string[] = [];
+  const names: string[] = [];
+  for (const file of accepted) {
+    if (remainingCharacters <= 0) break;
+    const text = (await file.text()).replace(/\0/g, "").trim();
+    const excerpt = text.slice(0, remainingCharacters);
+    fragments.push(`Файл: ${file.webkitRelativePath || file.name}\n${excerpt}`);
+    names.push(file.webkitRelativePath || file.name);
+    remainingCharacters -= excerpt.length;
+  }
+  selectedFileNames.value = names;
+  selectedFileContext.value = `Содержимое файлов, которые пользователь явно выбрал только для чтения:\n\n${fragments.join("\n\n")}`;
+  lastCommand.value = `Подготовлено к локальному анализу: ${names.join(", ")}`;
+}
+
+function clearSelectedFiles() {
+  selectedFileNames.value = [];
+  selectedFileContext.value = "";
+}
+
 function submitMessage() {
   const text = input.value.trim();
   if (!text || isWorking.value) return;
   input.value = "";
-  processVoiceCommand(text);
+  const fileContext = selectedFileContext.value || null;
+  clearSelectedFiles();
+  processVoiceCommand(text, false, fileContext);
 }
 
 function permissionStatus(id: string) {
@@ -2410,7 +2451,19 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <div v-if="!conversationListOpen && selectedFileNames.length" class="file-context-strip">
+          <span>Только чтение · {{ selectedFileNames.length }} файл(а): {{ selectedFileNames.join(", ") }}</span>
+          <button type="button" aria-label="Убрать выбранные файлы" @click="clearSelectedFiles">×</button>
+        </div>
         <form v-if="!conversationListOpen" class="drawer-composer" @submit.prevent="submitMessage">
+          <label class="composer-attachment" title="Выбрать файлы для локального анализа">
+            <span>＋</span>
+            <input type="file" multiple accept=".txt,.md,.json,.csv,.log,.rs,.toml,.ts,.tsx,.js,.jsx,.vue,.css,.html,.py,.php,.sql,.yaml,.yml" @change="selectFilesForAnalysis" />
+          </label>
+          <label class="composer-attachment" title="Выбрать папку для локального анализа">
+            <span>▤</span>
+            <input type="file" multiple webkitdirectory="" @change="selectFilesForAnalysis" />
+          </label>
           <span class="composer-language">{{ commandLanguage.toUpperCase() }}</span>
           <textarea
             v-model="input"

@@ -226,7 +226,10 @@ fn install_recommended_models_blocking() -> Result<ModelInstallReport, String> {
             fs::remove_file(&destination).map_err(|error| error.to_string())?;
         }
         fs::rename(&partial, &destination).map_err(|error| {
-            format!("Не удалось завершить установку {}: {error}", model.file_name)
+            format!(
+                "Не удалось завершить установку {}: {error}",
+                model.file_name
+            )
         })?;
         downloaded_bytes += bytes;
         installed.push(model.file_name.to_string());

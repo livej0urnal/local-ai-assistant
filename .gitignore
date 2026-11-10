@@ -6,3 +6,5 @@ node_modules/
 *.log
 public/private-audio/*
 !public/private-audio/README.md
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep

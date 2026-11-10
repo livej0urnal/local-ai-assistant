@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import droidPortrait from "./assets/protocol-droid.png";
+import { assistantPhrase, voiceDemoPhrases } from "./assistantPhrases";
 
 type Message = {
   id: number;
@@ -35,6 +36,7 @@ type EnvironmentReport = {
   system: SystemInfo;
   platform: string;
   family: string;
+  isAppBundle: boolean;
   capabilities: NativeCapability[];
 };
 
@@ -76,7 +78,7 @@ const messages = ref<Message[]>([
   {
     id: 1,
     role: "assistant",
-    text: "Здравствуйте. Голосовой режим готов. Скажите: «Покажи информацию о системе».",
+    text: `${assistantPhrase("greeting")} Скажите: «Покажи информацию о системе».`,
   },
 ]);
 const nextMessageId = ref(2);
@@ -101,9 +103,12 @@ const lastError = ref<AppError | null>(null);
 const recentLogs = ref<string[]>([]);
 const logPath = ref("");
 const logsLoading = ref(false);
+const logsExpanded = ref(false);
 const processMetrics = ref<ProcessMetrics | null>(null);
 const memoryBaselineBytes = ref(0);
 const memoryPeakBytes = ref(0);
+const selectedVoiceName = ref("Системный русский голос");
+const recognitionBlockedReason = ref("");
 
 let recognition: RecognitionLike | null = null;
 let microphoneStream: MediaStream | null = null;
@@ -112,6 +117,7 @@ let meterFrame = 0;
 let restartTimer = 0;
 let shouldListen = false;
 let memoryTimer = 0;
+let voiceDemoIndex = 0;
 
 const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
 const systemLabel = computed(() => {
@@ -149,6 +155,13 @@ const processMemoryDelta = computed(() => {
   const delta = processMetrics.value.residentMemoryBytes - memoryBaselineBytes.value;
   const sign = delta > 0 ? "+" : "";
   return `${sign}${formatBytes(delta)}`;
+});
+const logSummary = computed(() => {
+  const errors = recentLogs.value.filter((line) => line.includes("| ERROR |")).length;
+  const warnings = recentLogs.value.filter((line) => line.includes("| WARN ")).length;
+  if (!recentLogs.value.length) return "Записей пока нет";
+  if (!errors && !warnings) return `${recentLogs.value.length} событий · ошибок нет`;
+  return `${recentLogs.value.length} событий · ошибок ${errors} · предупреждений ${warnings}`;
 });
 
 function formatBytes(bytes: number) {
@@ -250,6 +263,7 @@ async function refreshLogs() {
 
 async function openPermissions() {
   permissionsOpen.value = true;
+  logsExpanded.value = false;
   await refreshLogs();
 }
 
@@ -272,6 +286,7 @@ async function loadEnvironment() {
   environment.value = {
     platform: navigator.platform.toLowerCase().includes("mac") ? "macos" : "browser",
     family: "browser",
+    isAppBundle: false,
     system: {
       operatingSystem: "Режим браузера",
       osVersion: "Предпросмотр",
@@ -299,8 +314,21 @@ function getRecognitionConstructor(): RecognitionConstructor | undefined {
 
 function configureRecognition() {
   const Recognition = getRecognitionConstructor();
-  recognitionAvailable.value = Boolean(Recognition);
   synthesisAvailable.value = "speechSynthesis" in window;
+
+  // macOS аварийно завершает «голый» tauri dev-процесс при обращении к
+  // SFSpeechRecognition. Системный API безопасно включаем только внутри .app,
+  // где TCC читает Contents/Info.plist. Сам микрофон в dev-режиме остаётся доступен.
+  if (environment.value?.platform === "macos" && !environment.value.isAppBundle) {
+    recognitionAvailable.value = false;
+    recognitionBlockedReason.value =
+      "Распознавание отключено в отладочном файле macOS. Запустите конфигурацию «C-3PO — Приложение», которая открывает пакет .app.";
+    void writeLog("warn", "voice.recognition", "Распознавание пропущено вне macOS .app для защиты от TCC-падения");
+    return;
+  }
+
+  recognitionAvailable.value = Boolean(Recognition);
+  recognitionBlockedReason.value = Recognition ? "" : "Системное распознавание речи недоступно в этом WebView.";
 
   if (!Recognition) return;
 
@@ -505,7 +533,12 @@ function speak(text: string) {
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   const voices = window.speechSynthesis.getVoices();
-  utterance.voice = voices.find((voice) => voice.lang.toLowerCase().startsWith("ru")) ?? null;
+  // На macOS обычно доступны Юрий и Milena. Выбираем русский голос,
+  // но не пытаемся имитировать конкретного живого актёра.
+  const russianVoices = voices.filter((voice) => voice.lang.toLowerCase().startsWith("ru"));
+  utterance.voice =
+    russianVoices.find((voice) => /yuri|юрий/i.test(voice.name)) ?? russianVoices[0] ?? null;
+  selectedVoiceName.value = utterance.voice?.name ?? "Системный русский голос";
   utterance.lang = "ru-RU";
   utterance.rate = 0.9;
   utterance.pitch = 1.08;
@@ -520,17 +553,25 @@ function speak(text: string) {
   window.speechSynthesis.speak(utterance);
 }
 
+function testVoice() {
+  const phrase = voiceDemoPhrases[voiceDemoIndex % voiceDemoPhrases.length];
+  voiceDemoIndex += 1;
+  lastCommand.value = phrase;
+  addMessage("assistant", phrase);
+  speak(phrase);
+}
+
 function proposeSystemInfo() {
   pendingAction.value = true;
   voiceState.value = "idle";
-  const response = "Я могу прочитать сведения о системе. Скажите «выполнить» или нажмите кнопку подтверждения.";
+  const response = `${assistantPhrase("systemPermission")} Скажите «выполнить» или нажмите кнопку подтверждения.`;
   addMessage("assistant", response);
   speak(response);
 }
 
 function cancelAction() {
   pendingAction.value = false;
-  const response = "Действие отменено. Никаких изменений не выполнено.";
+  const response = assistantPhrase("actionCancelled");
   addMessage("assistant", response);
   speak(response);
 }
@@ -557,7 +598,7 @@ async function approveAction() {
     lastCommand.value = response;
     speak(response);
   } catch (error) {
-    const response = `Не удалось получить информацию: ${String(error)}`;
+    const response = `${assistantPhrase("systemFailure")} ${String(error)}`;
     addMessage("assistant", response);
     speak(response);
   } finally {
@@ -585,18 +626,18 @@ function processVoiceCommand(text: string) {
   }
   if (/(открой|покажи).*(чат|диалог)/.test(normalized)) {
     chatOpen.value = true;
-    const response = "Открываю текстовый диалог.";
+    const response = assistantPhrase("chatOpened");
     addMessage("assistant", response);
     speak(response);
     return;
   }
   if (/(закрой|скрой).*(чат|диалог)/.test(normalized)) {
     chatOpen.value = false;
-    speak("Диалог закрыт. Продолжаю слушать голосовые команды.");
+    speak(assistantPhrase("chatClosed"));
     return;
   }
 
-  const response = "Эту команду я пока не умею выполнять. Сейчас доступна информация о системе.";
+  const response = `${assistantPhrase("unknownCommand")} Сейчас доступна информация о системе.`;
   addMessage("assistant", response);
   speak(response);
 }
@@ -616,9 +657,20 @@ function permissionStatus(id: string) {
   return "prompt";
 }
 
+function permissionStatusLabel(id: string) {
+  const labels: Record<PermissionState, string> = {
+    checking: "проверка",
+    prompt: "нужно разрешение",
+    granted: "разрешено",
+    denied: "запрещено",
+    unsupported: "недоступно",
+  };
+  return labels[permissionStatus(id) as PermissionState] ?? "неизвестно";
+}
+
 onMounted(async () => {
-  configureRecognition();
   await loadEnvironment();
+  configureRecognition();
   await refreshProcessMetrics();
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
   // позволяют заметить устойчивый рост памяти во время долгой работы.
@@ -697,7 +749,7 @@ onBeforeUnmount(() => {
           </button>
 
           <p v-if="microphonePermission === 'granted' && !recognitionAvailable" class="voice-warning">
-            Микрофон доступен, но системное распознавание речи не поддерживается этим WebView.
+            {{ recognitionBlockedReason || "Микрофон доступен, но распознавание речи сейчас отключено." }}
           </p>
           <div v-if="lastError" class="error-card" role="alert">
             <div>
@@ -736,6 +788,14 @@ onBeforeUnmount(() => {
               <small>Показать текстовую историю справа</small>
             </span>
             <b>→</b>
+          </button>
+          <button type="button" @click="testVoice">
+            <span class="command-icon">♫</span>
+            <span>
+              <strong>Проверить голос</strong>
+              <small>{{ selectedVoiceName }} · каждое нажатие — новая ситуация</small>
+            </span>
+            <b>▶</b>
           </button>
         </div>
       </section>
@@ -811,7 +871,9 @@ onBeforeUnmount(() => {
           <article>
             <span class="permission-icon">●</span>
             <div><strong>Микрофон</strong><small>{{ microphoneLabel }}</small></div>
-            <span class="permission-state" :class="permissionStatus('microphone')">{{ permissionStatus('microphone') }}</span>
+            <span class="permission-state" :class="permissionStatus('microphone')">
+              {{ permissionStatusLabel("microphone") }}
+            </span>
             <button v-if="microphonePermission !== 'granted'" type="button" @click="requestMicrophone">Запросить</button>
           </article>
           <article>
@@ -835,15 +897,20 @@ onBeforeUnmount(() => {
           <header>
             <div>
               <strong>Журнал событий и ошибок</strong>
-              <small>Содержит технические сведения, но не записывает звук или текст команд</small>
+              <small>{{ logSummary }} · звук и текст команд не сохраняются</small>
             </div>
-            <button type="button" :disabled="logsLoading" @click="refreshLogs">
-              {{ logsLoading ? "Читаю…" : "Обновить" }}
-            </button>
+            <div class="log-actions">
+              <button type="button" :disabled="logsLoading" @click="refreshLogs" title="Обновить журнал">↻</button>
+              <button type="button" @click="logsExpanded = !logsExpanded">
+                {{ logsExpanded ? "Свернуть" : "Показать" }}
+              </button>
+            </div>
           </header>
-          <pre v-if="recentLogs.length">{{ recentLogs.join("\n") }}</pre>
-          <p v-else>Записей пока нет.</p>
-          <small v-if="logPath" class="log-path">Файл: {{ logPath }}</small>
+          <template v-if="logsExpanded">
+            <pre v-if="recentLogs.length">{{ recentLogs.join("\n") }}</pre>
+            <p v-else>Записей пока нет.</p>
+            <small v-if="logPath" class="log-path">Файл: {{ logPath }}</small>
+          </template>
         </section>
 
         <p class="permission-note">

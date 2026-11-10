@@ -46,6 +46,7 @@ struct EnvironmentReport {
     system: SystemInfo,
     platform: String,
     family: String,
+    is_app_bundle: bool,
     capabilities: Vec<NativeCapability>,
 }
 
@@ -222,6 +223,9 @@ fn get_environment_report() -> Result<EnvironmentReport, String> {
         system: collect_system_info()?,
         platform: std::env::consts::OS.to_string(),
         family: std::env::consts::FAMILY.to_string(),
+        is_app_bundle: std::env::current_exe()
+            .map(|path| path.to_string_lossy().contains(".app/Contents/MacOS/"))
+            .unwrap_or(false),
         capabilities: vec![
             NativeCapability {
                 id: "system-info".to_string(),

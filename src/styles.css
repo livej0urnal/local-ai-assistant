@@ -652,8 +652,8 @@ button:disabled {
   letter-spacing: -0.025em;
 }
 
-.chat-drawer header > button,
-.permission-modal header > button {
+.chat-drawer > header > button,
+.permission-modal > header > button {
   display: grid;
   place-items: center;
   width: 36px;
@@ -750,7 +750,7 @@ button:disabled {
 }
 
 .permission-modal {
-  width: min(620px, 100%);
+  width: min(680px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   border: 1px solid var(--line);
@@ -758,6 +758,14 @@ button:disabled {
   background: var(--surface);
   box-shadow: var(--shadow);
   animation: modal-in 180ms ease-out;
+}
+
+.permission-modal > header {
+  position: sticky;
+  z-index: 4;
+  top: 0;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(14px);
 }
 
 .system-summary {
@@ -886,7 +894,6 @@ button:disabled {
   justify-content: space-between;
   gap: 14px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
 }
 
 .error-log strong,
@@ -915,8 +922,21 @@ button:disabled {
   font-weight: 700;
 }
 
+.log-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.log-actions button:first-child {
+  width: 32px;
+  padding: 0;
+  font-size: 15px;
+}
+
 .error-log pre {
-  max-height: 180px;
+  max-height: 150px;
+  border-top: 1px solid var(--line);
   margin: 0;
   padding: 12px 14px;
   overflow: auto;
@@ -1151,13 +1171,33 @@ button:disabled {
   }
 
   .permission-list article {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 0;
+    padding: 12px 0;
+  }
+
+  .permission-list article > .permission-state {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .permission-list article > button {
-    grid-column: 2 / -1;
+    grid-column: 2;
     justify-self: start;
-    margin-bottom: 10px;
+    margin-bottom: 0;
+  }
+
+  .error-log > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .log-actions {
+    align-self: stretch;
+  }
+
+  .log-actions button:last-child {
+    flex: 1;
   }
 }
 

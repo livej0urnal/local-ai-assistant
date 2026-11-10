@@ -19,6 +19,7 @@ pub(crate) struct WeatherReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplicationId {
     Telegram,
+    WhatsApp,
     Browser,
     Mail,
     Files,
@@ -42,6 +43,9 @@ fn normalize(value: &str) -> String {
 fn application_id(value: &str) -> Option<ApplicationId> {
     match normalize(value).as_str() {
         "telegram" | "телеграм" | "телеграмм" => Some(ApplicationId::Telegram),
+        "whatsapp" | "ватсап" | "вацап" | "вотсап" => {
+            Some(ApplicationId::WhatsApp)
+        }
         "browser" | "браузер" | "safari" | "chrome" | "google chrome" => {
             Some(ApplicationId::Browser)
         }
@@ -60,6 +64,7 @@ fn application_id(value: &str) -> Option<ApplicationId> {
 fn launch(application: ApplicationId) -> Result<(), String> {
     let name = match application {
         ApplicationId::Telegram => "Telegram",
+        ApplicationId::WhatsApp => "WhatsApp",
         ApplicationId::Browser => "Safari",
         ApplicationId::Mail => "Mail",
         ApplicationId::Files => "Finder",
@@ -84,6 +89,7 @@ fn launch(application: ApplicationId) -> Result<(), String> {
 fn launch(application: ApplicationId) -> Result<(), String> {
     let (program, argument) = match application {
         ApplicationId::Telegram => ("explorer.exe", "tg://"),
+        ApplicationId::WhatsApp => ("explorer.exe", "whatsapp://"),
         ApplicationId::Browser => ("explorer.exe", "https://www.google.com"),
         ApplicationId::Mail => ("explorer.exe", "mailto:"),
         ApplicationId::Files => ("explorer.exe", "."),
@@ -111,7 +117,7 @@ fn launch(_application: ApplicationId) -> Result<(), String> {
 #[tauri::command]
 pub(crate) fn open_application(application: String) -> Result<ActionResult, String> {
     let application_id = application_id(&application).ok_or_else(|| {
-        "Приложение отсутствует в безопасном каталоге C-3PO. Доступны Telegram, браузер, почта, файлы, заметки, календарь, калькулятор, погода и настройки.".to_string()
+        "Приложение отсутствует в безопасном каталоге C-3PO. Доступны Telegram, WhatsApp, браузер, почта, файлы, заметки, календарь, калькулятор, погода и настройки.".to_string()
     })?;
     launch(application_id)?;
     Ok(ActionResult {
@@ -326,6 +332,7 @@ mod tests {
     #[test]
     fn resolves_only_known_application_aliases() {
         assert_eq!(application_id("Телеграмм"), Some(ApplicationId::Telegram));
+        assert_eq!(application_id("WhatsApp"), Some(ApplicationId::WhatsApp));
         assert_eq!(application_id("Погода"), Some(ApplicationId::Weather));
         assert_eq!(
             application_id("калькулятор"),

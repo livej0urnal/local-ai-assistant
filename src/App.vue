@@ -996,12 +996,24 @@ async function askLocalModel(prompt: string, showInConversation = true, toolCont
     if (!llmRuntime.value?.ready && !(await startLocalModel())) {
       throw new Error("Локальная модель не запустилась");
     }
+    const now = new Date();
+    const trustedTimeContext = [
+      `Системная дата и время: ${new Intl.DateTimeFormat(selectedCommandLanguage.value.speechCode, {
+        dateStyle: "full",
+        timeStyle: "medium",
+      }).format(now)}`,
+      `ISO-дата: ${now.toISOString().slice(0, 10)}`,
+      `Часовой пояс: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+    ].join(". ");
+    const combinedToolContext = toolContext
+      ? `${trustedTimeContext}\n${toolContext}`
+      : trustedTimeContext;
     const reply = await invoke<LocalReply>("generate_local_reply", {
       prompt,
       language: selectedCommandLanguage.value.modelName,
       userName: currentProfile.value?.name ?? null,
       preferredModel: modelPreference.value === "auto" ? null : modelPreference.value,
-      toolContext,
+      toolContext: combinedToolContext,
     });
     llmTestReply.value = reply.text;
     lastCommand.value = reply.text;
@@ -1996,6 +2008,18 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   }
   if (/(погод|weather|tiempo|wetter|m[ée]t[ée]o|tempo|天气|天気|طقس)/iu.test(normalized)) {
     void answerWeatherQuestion(text, notifyInBackground);
+    return;
+  }
+  if (/(какой сегодня день|какая сегодня дата|сегодняшн.*(?:день|дата)|который час|сколько времени|what day is it|what(?:'s| is) the date|what time is it)/iu.test(normalized)) {
+    const now = new Date();
+    const response = `Сегодня ${new Intl.DateTimeFormat(selectedCommandLanguage.value.speechCode, {
+      dateStyle: "full",
+      timeStyle: /час|врем|time/iu.test(normalized) ? "short" : undefined,
+    }).format(now)}. Часовой пояс: ${Intl.DateTimeFormat().resolvedOptions().timeZone}.`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    if (notifyInBackground) void notifyFromBackground(response);
     return;
   }
   if (normalized.includes(localizedChatCommand) || /(открой|покажи).*(чат|диалог)/.test(normalized)) {

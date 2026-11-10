@@ -23,6 +23,7 @@ PORT = int(os.environ.get("C3PO_TTS_PORT", "11438"))
 REFERENCE = Path(os.environ["C3PO_TTS_REFERENCE"])
 SUPPORTED_LANGUAGES = {"ru", "en", "es", "de", "fr", "it", "pt", "zh", "ja", "ar"}
 MAX_TEXT_LENGTH = 1_200
+VOICE_PIPELINE_VERSION = "2-natural-speech"
 
 model = None
 engine_name: str | None = None
@@ -50,7 +51,7 @@ def load_model():
                     model = load_mlx_model("mlx-community/chatterbox-multilingual-v3")
                     # Голосовой отпечаток не зависит от текста. Вычисляем его
                     # один раз вместо повторной обработки reference.wav.
-                    voice_conditionals = model.prepare_conditionals(str(REFERENCE), 0, exaggeration=0.1)
+                    voice_conditionals = model.prepare_conditionals(str(REFERENCE), 0, exaggeration=0.45)
                     engine_name = "mlx"
                     model_error = None
                     print("MLX Chatterbox is ready", flush=True)
@@ -147,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
             cache_directory.mkdir(parents=True, exist_ok=True)
             reference_version = f"{REFERENCE.stat().st_size}:{REFERENCE.stat().st_mtime_ns}"
             cache_key = hashlib.sha256(
-                f"{engine_name}|{language}|{reference_version}|{text}".encode("utf-8")
+                f"{VOICE_PIPELINE_VERSION}|{engine_name}|{language}|{reference_version}|{text}".encode("utf-8")
             ).hexdigest()
             cache_path = cache_directory / f"{cache_key}.wav"
             if cache_path.is_file():
@@ -165,6 +166,10 @@ class Handler(BaseHTTPRequestHandler):
                             text=text,
                             conds=voice_conditionals,
                             lang_code=language,
+                            exaggeration=0.45,
+                            cfg_weight=0.35,
+                            temperature=0.65,
+                            repetition_penalty=1.35,
                             verbose=False,
                         ))
                         if not results:
@@ -174,7 +179,15 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         import torchaudio
 
-                        wav = tts.generate(text, language_id=language, audio_prompt_path=str(REFERENCE))
+                        wav = tts.generate(
+                            text,
+                            language_id=language,
+                            audio_prompt_path=str(REFERENCE),
+                            exaggeration=0.45,
+                            cfg_weight=0.35,
+                            temperature=0.65,
+                            repetition_penalty=1.35,
+                        )
                         torchaudio.save(str(output_path), wav, tts.sr)
                     audio = output_path.read_bytes()
                     temporary_cache = cache_path.with_suffix(".tmp")
@@ -214,6 +227,10 @@ if __name__ == "__main__":
                         text="Готов.",
                         conds=voice_conditionals,
                         lang_code="ru",
+                        exaggeration=0.45,
+                        cfg_weight=0.35,
+                        temperature=0.65,
+                        repetition_penalty=1.35,
                         verbose=False,
                     ))
                 print("MLX voice graph is warmed up", flush=True)

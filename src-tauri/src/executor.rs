@@ -1,4 +1,7 @@
 use serde::Serialize;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -16,20 +19,6 @@ pub(crate) struct WeatherReport {
     summary: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ApplicationId {
-    Telegram,
-    WhatsApp,
-    Browser,
-    Mail,
-    Files,
-    Notes,
-    Calendar,
-    Calculator,
-    Settings,
-    Weather,
-}
-
 fn normalize(value: &str) -> String {
     value
         .trim()
@@ -40,89 +29,260 @@ fn normalize(value: &str) -> String {
         .join(" ")
 }
 
-fn application_id(value: &str) -> Option<ApplicationId> {
+fn canonical_application_name(value: &str) -> String {
     match normalize(value).as_str() {
-        "telegram" | "телеграм" | "телеграмм" => Some(ApplicationId::Telegram),
-        "whatsapp" | "ватсап" | "вацап" | "вотсап" => {
-            Some(ApplicationId::WhatsApp)
+        "telegram" | "телеграм" | "телеграмм" => "Telegram".to_string(),
+        "whatsapp" | "ватсап" | "вацап" | "вотсап" => "WhatsApp".to_string(),
+        "chrome" | "google chrome" | "гугл хром" | "хром" => {
+            "Google Chrome".to_string()
         }
-        "browser" | "браузер" | "safari" | "chrome" | "google chrome" => {
-            Some(ApplicationId::Browser)
+        "safari" | "сафари" => "Safari".to_string(),
+        "mail" | "почта" | "email" => "Mail".to_string(),
+        "finder" | "проводник" | "файлы" | "files" => {
+            if cfg!(target_os = "windows") {
+                "File Explorer"
+            } else {
+                "Finder"
+            }
+            .to_string()
         }
-        "mail" | "почта" | "email" => Some(ApplicationId::Mail),
-        "finder" | "проводник" | "файлы" | "files" => Some(ApplicationId::Files),
-        "notes" | "заметки" | "блокнот" => Some(ApplicationId::Notes),
-        "calendar" | "календарь" => Some(ApplicationId::Calendar),
-        "calculator" | "калькулятор" => Some(ApplicationId::Calculator),
-        "settings" | "настройки" | "параметры" => Some(ApplicationId::Settings),
-        "weather" | "погода" => Some(ApplicationId::Weather),
-        _ => None,
+        "notes" | "заметки" | "блокнот" => if cfg!(target_os = "windows") {
+            "Notepad"
+        } else {
+            "Notes"
+        }
+        .to_string(),
+        "calendar" | "календарь" => "Calendar".to_string(),
+        "calculator" | "калькулятор" => "Calculator".to_string(),
+        "settings" | "настройки" | "параметры" => {
+            if cfg!(target_os = "windows") {
+                "Settings"
+            } else {
+                "System Settings"
+            }
+            .to_string()
+        }
+        "weather" | "погода" => "Weather".to_string(),
+        // Для любого другого приложения сохраняем произнесённое имя. Оно не
+        // исполняется как команда, а сравнивается с системным каталогом.
+        _ => value.trim().to_string(),
     }
 }
 
 #[cfg(target_os = "macos")]
-fn launch(application: ApplicationId) -> Result<(), String> {
-    let name = match application {
-        ApplicationId::Telegram => "Telegram",
-        ApplicationId::WhatsApp => "WhatsApp",
-        ApplicationId::Browser => "Safari",
-        ApplicationId::Mail => "Mail",
-        ApplicationId::Files => "Finder",
-        ApplicationId::Notes => "Notes",
-        ApplicationId::Calendar => "Calendar",
-        ApplicationId::Calculator => "Calculator",
-        ApplicationId::Settings => "System Settings",
-        ApplicationId::Weather => "Weather",
+fn collect_macos_bundles(directory: &Path, depth: usize, paths: &mut BTreeSet<PathBuf>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        {
+            if path.is_dir() {
+                paths.insert(path);
+            }
+        } else if path.is_dir() {
+            collect_macos_bundles(&path, depth - 1, paths);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn installed_applications() -> Vec<(String, PathBuf)> {
+    let mut paths = BTreeSet::new();
+    // Spotlight возвращает зарегистрированные bundle-пути, включая приложения
+    // пользователя. Запрос является константой и не содержит пользовательский текст.
+    if let Ok(output) = Command::new("/usr/bin/mdfind")
+        .arg("kMDItemContentType == 'com.apple.application-bundle'")
+        .output()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = PathBuf::from(line.trim());
+            if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+                && path.is_dir()
+            {
+                paths.insert(path);
+            }
+        }
+    }
+    // На компьютерах с выключенным Spotlight используем предсказуемый обход
+    // стандартных каталогов и никогда не заходим внутрь найденного .app-bundle.
+    for root in [
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+        dirs_home().join("Applications"),
+    ] {
+        collect_macos_bundles(&root, 5, &mut paths);
+    }
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_string_lossy().trim().to_string();
+            (!name.is_empty()).then_some((name, path))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn dirs_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn launch_named_application(requested: &str) -> Result<String, String> {
+    let requested = canonical_application_name(requested);
+    if normalize(&requested) == "browser" || normalize(&requested) == "браузер" {
+        Command::new("/usr/bin/open")
+            .arg("https://www.google.com")
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть браузер: {error}"))?;
+        return Ok("браузер по умолчанию".to_string());
+    }
+    let query = normalize(&requested);
+    let applications = installed_applications();
+    let exact = applications
+        .iter()
+        .find(|(name, _)| normalize(name) == query);
+    let selected = if let Some(application) = exact {
+        application
+    } else {
+        let partial = applications
+            .iter()
+            .filter(|(name, _)| normalize(name).contains(&query))
+            .collect::<Vec<_>>();
+        match partial.as_slice() {
+            [application] => application,
+            [] => {
+                return Err(format!(
+                    "Приложение «{requested}» не найдено среди установленных."
+                ));
+            }
+            _ => {
+                let names = partial
+                    .iter()
+                    .take(5)
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>();
+                return Err(format!(
+                    "Найдено несколько приложений: {}. Назовите точнее.",
+                    names.join(", ")
+                ));
+            }
+        }
     };
     let output = Command::new("/usr/bin/open")
-        .args(["-a", name])
+        .arg(&selected.1)
         .output()
-        .map_err(|error| format!("Не удалось запустить {name}: {error}"))?;
+        .map_err(|error| format!("Не удалось запустить {}: {error}", selected.0))?;
     if output.status.success() {
-        Ok(())
+        Ok(selected.0.clone())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
 #[cfg(target_os = "windows")]
-fn launch(application: ApplicationId) -> Result<(), String> {
-    let (program, argument) = match application {
-        ApplicationId::Telegram => ("explorer.exe", "tg://"),
-        ApplicationId::WhatsApp => ("explorer.exe", "whatsapp://"),
-        ApplicationId::Browser => ("explorer.exe", "https://www.google.com"),
-        ApplicationId::Mail => ("explorer.exe", "mailto:"),
-        ApplicationId::Files => ("explorer.exe", "."),
-        ApplicationId::Notes => ("notepad.exe", ""),
-        ApplicationId::Calendar => ("explorer.exe", "outlookcal:"),
-        ApplicationId::Calculator => ("calc.exe", ""),
-        ApplicationId::Settings => ("explorer.exe", "ms-settings:"),
-        ApplicationId::Weather => ("explorer.exe", "msnweather:"),
-    };
-    let mut command = Command::new(program);
-    if !argument.is_empty() {
-        command.arg(argument);
+fn collect_windows_shortcuts(directory: &Path, depth: usize, result: &mut Vec<(String, PathBuf)>) {
+    if depth == 0 {
+        return;
     }
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Не удалось запустить приложение: {error}"))
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_windows_shortcuts(&path, depth - 1, result);
+        } else if path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("lnk") || extension.eq_ignore_ascii_case("appref-ms")
+        }) && let Some(name) = path
+            .file_stem()
+            .map(|name| name.to_string_lossy().trim().to_string())
+        {
+            if !name.is_empty() {
+                result.push((name, path));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn launch_named_application(requested: &str) -> Result<String, String> {
+    let requested = canonical_application_name(requested);
+    let query = normalize(&requested);
+    let mut applications = Vec::new();
+    for variable in ["PROGRAMDATA", "APPDATA"] {
+        if let Ok(root) = std::env::var(variable) {
+            collect_windows_shortcuts(
+                &PathBuf::from(root).join("Microsoft/Windows/Start Menu/Programs"),
+                6,
+                &mut applications,
+            );
+        }
+    }
+    if let Some((name, path)) = applications
+        .iter()
+        .find(|(name, _)| normalize(name) == query)
+    {
+        Command::new("explorer.exe")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть {name}: {error}"))?;
+        return Ok(name.clone());
+    }
+    let known = match query.as_str() {
+        "file explorer" => Some(("explorer.exe", "")),
+        "notepad" => Some(("notepad.exe", "")),
+        "calculator" => Some(("calc.exe", "")),
+        "settings" => Some(("explorer.exe", "ms-settings:")),
+        "mail" => Some(("explorer.exe", "mailto:")),
+        "calendar" => Some(("explorer.exe", "outlookcal:")),
+        "weather" => Some(("explorer.exe", "msnweather:")),
+        "browser" | "браузер" => Some(("explorer.exe", "https://www.google.com")),
+        "telegram" => Some(("explorer.exe", "tg://")),
+        "whatsapp" => Some(("explorer.exe", "whatsapp://")),
+        _ => None,
+    };
+    if let Some((program, argument)) = known {
+        let mut command = Command::new(program);
+        if !argument.is_empty() {
+            command.arg(argument);
+        }
+        command
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть {requested}: {error}"))?;
+        return Ok(requested);
+    }
+    Err(format!("Приложение «{requested}» не найдено в меню Пуск."))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn launch(_application: ApplicationId) -> Result<(), String> {
+fn launch_named_application(_requested: &str) -> Result<String, String> {
     Err("Запуск приложений пока поддерживается только на macOS и Windows".to_string())
 }
 
 #[tauri::command]
 pub(crate) fn open_application(application: String) -> Result<ActionResult, String> {
-    let application_id = application_id(&application).ok_or_else(|| {
-        "Приложение отсутствует в безопасном каталоге C-3PO. Доступны Telegram, WhatsApp, браузер, почта, файлы, заметки, календарь, калькулятор, погода и настройки.".to_string()
-    })?;
-    launch(application_id)?;
+    if application.trim().is_empty()
+        || application.chars().count() > 120
+        || application.chars().any(char::is_control)
+    {
+        return Err("Укажите корректное название приложения".to_string());
+    }
+    let opened_name = launch_named_application(&application)?;
     Ok(ActionResult {
         success: true,
-        message: format!("Приложение «{}» открыто.", application.trim()),
+        message: format!("Приложение «{opened_name}» открыто."),
     })
 }
 
@@ -262,7 +422,7 @@ on run argv
   end try
 end run
 "#;
-    launch(ApplicationId::Telegram)?;
+    launch_named_application("Telegram")?;
     let output = Command::new("/usr/bin/osascript")
         .args(["-e", SCRIPT, contact, message])
         .output()
@@ -330,15 +490,15 @@ mod tests {
     }
 
     #[test]
-    fn resolves_only_known_application_aliases() {
-        assert_eq!(application_id("Телеграмм"), Some(ApplicationId::Telegram));
-        assert_eq!(application_id("WhatsApp"), Some(ApplicationId::WhatsApp));
-        assert_eq!(application_id("Погода"), Some(ApplicationId::Weather));
+    fn resolves_application_aliases_without_replacing_chrome_with_safari() {
+        assert_eq!(canonical_application_name("Телеграмм"), "Telegram");
+        assert_eq!(canonical_application_name("WhatsApp"), "WhatsApp");
+        assert_eq!(canonical_application_name("хром"), "Google Chrome");
+        assert_eq!(canonical_application_name("Safari"), "Safari");
         assert_eq!(
-            application_id("калькулятор"),
-            Some(ApplicationId::Calculator)
+            canonical_application_name("неизвестная программа"),
+            "неизвестная программа"
         );
-        assert_eq!(application_id("неизвестная программа"), None);
     }
 
     #[test]

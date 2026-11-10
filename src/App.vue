@@ -1584,7 +1584,36 @@ async function ensureTtsServer() {
   }
 }
 
-function splitSpeechText(text: string, maxCharacters = 220) {
+function prepareSpeechText(text: string) {
+  const codeNotice = commandLanguage.value === "ru"
+    ? "Фрагмент кода показан в истории диалога."
+    : "The code sample is available in the conversation history.";
+  let spoken = text
+    // Голос не должен зачитывать Markdown, URL и служебные символы модели.
+    .replace(/```[\s\S]*?```/gu, ` ${codeNotice} `)
+    .replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1")
+    .replace(/https?:\/\/\S+/giu, "")
+    .replace(/^\s{0,3}#{1,6}\s*/gmu, "")
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s+/gmu, "")
+    .replace(/[*_~`>|]/gu, "")
+    .replace(/\s*\n+\s*/gu, ". ")
+    .replace(/\s+/gu, " ")
+    .trim();
+
+  // Названия дроидов и технические сокращения иначе читаются как случайный
+  // набор латинских букв. Русская транскрипция делает речь предсказуемой.
+  if (commandLanguage.value === "ru") {
+    spoken = spoken
+      .replace(/\bC\s*[- ]?3\s*P\s*[- ]?O\b/giu, "Си-три-пи-о")
+      .replace(/\bR\s*2\s*[- ]?D\s*2\b/giu, "Эр-два-Дэ-два")
+      .replace(/\bRAM\b/giu, "оперативная память")
+      .replace(/\bmacOS\b/giu, "мак-о-эс")
+      .replace(/\bWindows\b/giu, "Виндоус");
+  }
+  return spoken.replace(/(?:\.\s*){2,}/gu, ". ").trim();
+}
+
+function splitSpeechText(text: string, maxCharacters = 140) {
   const chunks: string[] = [];
   const sentences = text.trim().match(/[^.!?。！？]+[.!?。！？]*/gu) ?? [text.trim()];
   let paragraph = "";
@@ -1643,6 +1672,7 @@ async function playGeneratedSpeech(blob: Blob, runId: number) {
   if (generatedVoiceUrl) URL.revokeObjectURL(generatedVoiceUrl);
   generatedVoiceUrl = URL.createObjectURL(blob);
   generatedVoiceAudio = new Audio(generatedVoiceUrl);
+  generatedVoiceAudio.preload = "auto";
   generatedVoiceAudio.volume = 0.92;
 
   await new Promise<void>((resolve, reject) => {
@@ -1709,6 +1739,8 @@ async function speak(text: string) {
   // Открытая панель означает, что пользователь выбрал текстовый сценарий.
   // Не дублируем видимый ответ голосом и не мешаем читать историю.
   if (silentMode.value || chatOpen.value || !text.trim()) return;
+  const spokenText = prepareSpeechText(text).slice(0, 1_000);
+  if (!spokenText) return;
   stopGeneratedSpeech?.();
   const runId = ++speechRunId;
   const resumeListening = shouldListen;
@@ -1733,16 +1765,23 @@ async function speak(text: string) {
     // Быстрый режим использует уже установленный в ОС движок и поэтому
     // подходит даже слабым компьютерам. В «Авто» личные записанные реплики
     // сохраняются, а произвольный длинный ответ начинается без ожидания ИИ-TTS.
+    // При раннем ответе состояние могло ещё не успеть загрузиться. Повторная
+    // нативная проверка не даёт режиму «Авто» внезапно перейти на женский
+    // системный голос, если личный профиль уже установлен.
+    if (voiceMode.value === "adaptive" && "__TAURI_INTERNALS__" in window
+      && !(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound)) {
+      ttsStatus.value = await invoke<TtsStatus>("get_tts_status").catch(() => ttsStatus.value);
+    }
     const personalVoiceReady = Boolean(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound);
     const useFastSystemVoice = voiceMode.value === "instant"
       || (voiceMode.value === "adaptive" && !personalVoiceReady);
     if (useFastSystemVoice && "speechSynthesis" in window) {
       await writeLog("info", "tts.system", "Быстрая озвучка ответа системным голосом", {
-        characters: text.length,
+        characters: spokenText.length,
         language: commandLanguage.value,
         mode: voiceMode.value,
       });
-      await playSystemSpeech(text.slice(0, 1200), runId);
+      await playSystemSpeech(spokenText, runId);
       selectedVoiceName.value = voiceMode.value === "adaptive"
         ? "Авто · системный голос (личный профиль не установлен)"
         : "Быстрый системный голос";
@@ -1753,9 +1792,9 @@ async function speak(text: string) {
     if (!(await ensureTtsServer()) || !ttsStatus.value) {
       throw new Error(ttsStatus.value?.message ?? "Локальный голосовой компонент не установлен");
     }
-    const chunks = splitSpeechText(text.slice(0, 1200));
+    const chunks = splitSpeechText(spokenText);
     await writeLog("info", "tts.synthesize", "Начата локальная озвучка полного ответа", {
-      characters: text.length,
+      characters: spokenText.length,
       language: commandLanguage.value,
       chunks: chunks.length,
     });

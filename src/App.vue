@@ -77,6 +77,7 @@ const onboardingOpen = ref(false);
 const voiceState = ref<VoiceState>("idle");
 const microphonePermission = ref<PermissionState>("checking");
 const microphoneDevices = ref(0);
+const microphoneActive = ref(false);
 const recognitionAvailable = ref(false);
 const synthesisAvailable = ref(false);
 const audioLevel = ref(0);
@@ -96,6 +97,9 @@ const systemLabel = computed(() => {
   return `${environment.value.system.operatingSystem} ${environment.value.system.osVersion}`;
 });
 const voiceStatus = computed(() => {
+  if (voiceState.value === "idle" && microphoneActive.value && !recognitionAvailable.value) {
+    return "Микрофон включён";
+  }
   const labels: Record<VoiceState, string> = {
     idle: "Готов к голосовой команде",
     listening: "Слушаю вас",
@@ -116,7 +120,7 @@ const microphoneLabel = computed(() => {
   };
   return labels[microphonePermission.value];
 });
-const isVoiceActive = computed(() => voiceState.value === "listening" || voiceState.value === "thinking");
+const canPauseMicrophone = computed(() => microphoneActive.value || voiceState.value === "speaking");
 
 async function scrollChat() {
   await nextTick();
@@ -270,6 +274,7 @@ async function requestMicrophone() {
       },
     });
     microphonePermission.value = "granted";
+    microphoneActive.value = true;
     onboardingOpen.value = false;
     await countMicrophones();
     startAudioMeter(microphoneStream);
@@ -306,14 +311,16 @@ async function inspectMicrophonePermission() {
 
 function pauseMicrophone() {
   stopRecognition("paused");
+  window.speechSynthesis?.cancel();
   microphoneStream?.getTracks().forEach((track) => track.stop());
   microphoneStream = null;
+  microphoneActive.value = false;
   window.cancelAnimationFrame(meterFrame);
   audioLevel.value = 0;
 }
 
 async function toggleMicrophone() {
-  if (isVoiceActive.value || voiceState.value === "speaking") {
+  if (canPauseMicrophone.value) {
     pauseMicrophone();
     return;
   }
@@ -500,12 +507,12 @@ onBeforeUnmount(() => {
 
           <button
             class="primary-microphone"
-            :class="{ active: isVoiceActive }"
+            :class="{ active: microphoneActive }"
             type="button"
             @click="toggleMicrophone"
           >
             <span class="microphone-icon"></span>
-            <span>{{ isVoiceActive ? "Поставить на паузу" : "Включить микрофон" }}</span>
+            <span>{{ canPauseMicrophone ? "Поставить на паузу" : "Включить микрофон" }}</span>
           </button>
 
           <p v-if="microphonePermission === 'granted' && !recognitionAvailable" class="voice-warning">

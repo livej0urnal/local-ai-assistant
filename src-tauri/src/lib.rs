@@ -131,6 +131,11 @@ mod tests {
 
         assert_eq!(report.platform, std::env::consts::OS);
         assert_eq!(report.family, std::env::consts::FAMILY);
-        assert!(report.capabilities.iter().any(|item| item.id == "microphone"));
+        assert!(
+            report
+                .capabilities
+                .iter()
+                .any(|item| item.id == "microphone")
+        );
     }
 }

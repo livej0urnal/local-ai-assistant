@@ -424,6 +424,22 @@ function rememberMicrophonePermission(state: PermissionState) {
   if (state === "granted" || state === "denied" || state === "prompt") {
     window.localStorage.setItem(microphonePermissionStorageKey, state);
   }
+  if ("__TAURI_INTERNALS__" in window && (state === "granted" || state === "denied")) {
+    void invoke("set_saved_microphone_approval", { approved: state === "granted" }).catch((error) => {
+      console.warn("Не удалось сохранить нативное состояние микрофона", error);
+    });
+  }
+}
+
+async function hasRememberedMicrophoneApproval() {
+  const localApproval = savedMicrophonePermission() === "granted";
+  if (!("__TAURI_INTERNALS__" in window)) return localApproval;
+  try {
+    return (await invoke<boolean>("get_saved_microphone_approval")) || localApproval;
+  } catch (error) {
+    await writeLog("warn", "microphone.permission-memory", `Не удалось прочитать нативную настройку: ${String(error)}`);
+    return localApproval;
+  }
 }
 
 const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
@@ -777,6 +793,32 @@ function getRecognitionConstructor(): RecognitionConstructor | undefined {
   return voiceWindow.SpeechRecognition ?? voiceWindow.webkitSpeechRecognition;
 }
 
+async function handleRecognizedSpeech(text: string) {
+  // Системные распознаватели записывают имя по-разному, поэтому принимаем
+  // латинское C-3PO и наиболее частые русские транскрипции.
+  const wakeWord = /(?:\bc\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|\bc3po\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио)/iu;
+  const wakeMatch = text.match(wakeWord);
+
+  if (!wakeMatch) {
+    // Пока окно скрыто, обычную речь игнорируем: C-3PO просыпается только
+    // после своего имени и не превращает фоновые разговоры в команды.
+    if (document.visibilityState === "visible") processVoiceCommand(text);
+    return;
+  }
+
+  if ("__TAURI_INTERNALS__" in window) {
+    await invoke("show_main_window");
+  }
+  const command = text.replace(wakeWord, "").replace(/^[,.:;!?\s-]+/u, "").trim();
+  if (command) {
+    processVoiceCommand(command);
+  } else {
+    liveTranscript.value = "";
+    lastCommand.value = t("listening");
+    voiceState.value = "listening";
+  }
+}
+
 function configureRecognition() {
   const Recognition = getRecognitionConstructor();
   synthesisAvailable.value = "speechSynthesis" in window;
@@ -837,7 +879,7 @@ function configureRecognition() {
     }
 
     liveTranscript.value = interimText || finalText;
-    if (finalText.trim()) processVoiceCommand(finalText.trim());
+    if (finalText.trim()) void handleRecognizedSpeech(finalText.trim());
   };
 }
 
@@ -956,32 +998,42 @@ async function inspectMicrophonePermission() {
     return;
   }
 
-  let permissionWasReadFromSystem = false;
+  const rememberedApproval = await hasRememberedMicrophoneApproval();
+  let reportedState: PermissionState | null = null;
   try {
     const status = await navigator.permissions.query({ name: "microphone" as PermissionName });
-    permissionWasReadFromSystem = true;
-    rememberMicrophonePermission(status.state);
+    reportedState = status.state;
     status.onchange = () => {
-      rememberMicrophonePermission(status.state);
-      if (status.state === "granted") void requestMicrophone();
+      if (status.state === "granted") {
+        rememberMicrophonePermission("granted");
+        void requestMicrophone();
+      } else if (status.state === "denied") {
+        rememberMicrophonePermission("denied");
+        pauseMicrophone();
+      }
     };
   } catch (error) {
-    // WKWebView не всегда поддерживает Permissions API для микрофона. В этом
-    // случае восстанавливаем последнее подтверждённое состояние интерфейса.
-    microphonePermission.value = savedMicrophonePermission() ?? "prompt";
     const details = errorDetails(error);
     await writeLog("warn", "microphone.permission-check", `${details.name}: ${details.message}`);
   }
 
-  if (microphonePermission.value === "granted") {
-    // Повторный getUserMedia не показывает системное окно, если macOS сохранила
-    // доступ. Если право было отозвано, catch синхронизирует интерфейс обратно.
+  await writeLog("info", "microphone.permission-memory", "Восстановление состояния микрофона", {
+    rememberedApproval,
+    reportedState,
+  });
+
+  if (reportedState === "granted" || (reportedState !== "denied" && rememberedApproval)) {
+    // WKWebView может сообщать `prompt` при уже выданном разрешении. Реальный
+    // getUserMedia является окончательной проверкой и не показывает окно снова,
+    // если macOS сохранила доступ.
+    microphonePermission.value = "granted";
     await requestMicrophone();
+  } else if (reportedState === "denied") {
+    rememberMicrophonePermission("denied");
+    onboardingOpen.value = false;
   } else {
+    microphonePermission.value = savedMicrophonePermission() === "denied" ? "denied" : "prompt";
     onboardingOpen.value = microphonePermission.value === "prompt";
-    if (!permissionWasReadFromSystem && microphonePermission.value === "denied") {
-      await writeLog("info", "microphone.permission-check", "Восстановлено сохранённое состояние: доступ запрещён");
-    }
   }
 }
 

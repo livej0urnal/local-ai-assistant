@@ -10,7 +10,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{System, get_current_pid};
-use tauri::webview::{PermissionKind, PermissionResponse};
+use tauri::{
+    Manager,
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    webview::{PermissionKind, PermissionResponse},
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -63,6 +68,49 @@ struct ClientLogEntry {
 }
 
 static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionPreferences {
+    microphone_approved: bool,
+}
+
+fn permission_preferences_path() -> Result<PathBuf, String> {
+    let project_dirs = ProjectDirs::from("com", "igorfilippov", "C-3PO")
+        .ok_or_else(|| "Не удалось определить папку настроек приложения".to_string())?;
+    let directory = project_dirs.data_local_dir().join("settings");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("permissions.json"))
+}
+
+fn read_permission_preferences() -> PermissionPreferences {
+    let Ok(path) = permission_preferences_path() else {
+        return PermissionPreferences::default();
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return PermissionPreferences::default();
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_saved_microphone_approval() -> bool {
+    read_permission_preferences().microphone_approved
+}
+
+#[tauri::command]
+fn set_saved_microphone_approval(approved: bool) -> Result<(), String> {
+    let _guard = SETTINGS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Настройки приложения временно недоступны".to_string())?;
+    let preferences = PermissionPreferences {
+        microphone_approved: approved,
+    };
+    let contents = serde_json::to_string_pretty(&preferences).map_err(|error| error.to_string())?;
+    fs::write(permission_preferences_path()?, contents).map_err(|error| error.to_string())
+}
 
 // Храним журнал в системной папке данных приложения, а не рядом с программой:
 // установленное приложение может не иметь права записывать файлы в свою папку.
@@ -268,6 +316,19 @@ fn get_process_metrics() -> Result<ProcessMetrics, String> {
     collect_process_metrics()
 }
 
+fn reveal_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    reveal_main_window(&app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -278,6 +339,43 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(llm::LlmRuntime::default())
+        .setup(|app| {
+            let status = MenuItemBuilder::with_id("status", "● C-3PO работает в фоне")
+                .enabled(false)
+                .build(app)?;
+            let open = MenuItemBuilder::with_id("open", "Открыть C-3PO").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Завершить C-3PO").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&status, &open, &quit]).build()?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().expect("application icon").clone())
+                .tooltip("C-3PO — локальный помощник")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => reveal_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        reveal_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .on_permission_request(|_, kind| {
             // Это разрешает запрос внутри WebView, но не обходит защиту ОС:
             // macOS/Windows всё равно показывают пользователю своё системное окно.
@@ -297,6 +395,9 @@ pub fn run() {
             get_system_info,
             get_environment_report,
             get_process_metrics,
+            show_main_window,
+            get_saved_microphone_approval,
+            set_saved_microphone_approval,
             llm::get_llm_status,
             llm::get_llm_runtime_status,
             llm::start_llm,

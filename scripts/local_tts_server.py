@@ -7,7 +7,9 @@ may download its model files on the first run; later synthesis is local.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import platform
 import tempfile
 import threading
 import traceback
@@ -23,19 +25,35 @@ SUPPORTED_LANGUAGES = {"ru", "en", "es", "de", "fr", "it", "pt", "zh", "ja", "ar
 MAX_TEXT_LENGTH = 1_200
 
 model = None
+engine_name: str | None = None
 model_error: str | None = None
 model_lock = threading.Lock()
 
 
 def load_model():
     """Load the large model once and prefer Apple/Windows GPU acceleration."""
-    global model, model_error
+    global model, model_error, engine_name
     if model is not None:
         return model
     with model_lock:
         if model is not None:
             return model
         try:
+            # MLX читает веса напрямую в unified memory Apple Silicon и не
+            # тащит PyTorch. На остальных процессорах импорт просто пропускается.
+            if platform.system() == "Darwin" and platform.machine().lower() in {"arm64", "aarch64"}:
+                try:
+                    from mlx_audio.tts.utils import load_model as load_mlx_model
+
+                    print("Loading Chatterbox Multilingual v3 on MLX", flush=True)
+                    model = load_mlx_model("mlx-community/chatterbox-multilingual-v3")
+                    engine_name = "mlx"
+                    model_error = None
+                    print("MLX Chatterbox is ready", flush=True)
+                    return model
+                except ImportError:
+                    print("MLX runtime is not installed; using portable Chatterbox", flush=True)
+
             import torch
             import perth
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
@@ -59,6 +77,7 @@ def load_model():
             # the newer repository-only `t3_model` switch. Keeping this call
             # version-pinned makes installation reproducible on macOS/Windows.
             model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+            engine_name = "pytorch"
             model_error = None
             print("Chatterbox is ready", flush=True)
             return model
@@ -120,16 +139,45 @@ class Handler(BaseHTTPRequestHandler):
                 raise FileNotFoundError("voice reference is missing")
 
             tts = load_model()
-            import torchaudio
+            cache_directory = Path(__file__).with_name("audio-cache")
+            cache_directory.mkdir(parents=True, exist_ok=True)
+            reference_version = f"{REFERENCE.stat().st_size}:{REFERENCE.stat().st_mtime_ns}"
+            cache_key = hashlib.sha256(
+                f"{engine_name}|{language}|{reference_version}|{text}".encode("utf-8")
+            ).hexdigest()
+            cache_path = cache_directory / f"{cache_key}.wav"
+            if cache_path.is_file():
+                audio = cache_path.read_bytes()
+                print(f"Voice cache hit for {len(text)} characters", flush=True)
+            else:
+                with model_lock, tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output:
+                    output_path = Path(output.name)
+                try:
+                    if engine_name == "mlx":
+                        import numpy as np
+                        from mlx_audio.audio_io import write as audio_write
 
-            with model_lock, tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output:
-                output_path = Path(output.name)
-                wav = tts.generate(text, language_id=language, audio_prompt_path=str(REFERENCE))
-                torchaudio.save(str(output_path), wav, tts.sr)
-            try:
-                audio = output_path.read_bytes()
-            finally:
-                output_path.unlink(missing_ok=True)
+                        results = list(tts.generate(
+                            text=text,
+                            ref_audio=str(REFERENCE),
+                            lang_code=language,
+                            verbose=False,
+                        ))
+                        if not results:
+                            raise RuntimeError("MLX did not return audio")
+                        result = results[-1]
+                        audio_write(str(output_path), np.array(result.audio), result.sample_rate)
+                    else:
+                        import torchaudio
+
+                        wav = tts.generate(text, language_id=language, audio_prompt_path=str(REFERENCE))
+                        torchaudio.save(str(output_path), wav, tts.sr)
+                    audio = output_path.read_bytes()
+                    temporary_cache = cache_path.with_suffix(".tmp")
+                    temporary_cache.write_bytes(audio)
+                    temporary_cache.replace(cache_path)
+                finally:
+                    output_path.unlink(missing_ok=True)
             self.send_response(200)
             self.cors_headers()
             self.send_header("Content-Type", "audio/wav")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -31,14 +32,19 @@ def main() -> None:
         raise SystemExit("Python 3.11 is required. Install it, then run this script with Python 3.11.")
 
     target = data_directory()
-    environment = target / "chatterbox-venv"
+    use_mlx = sys.platform == "darwin" and platform.machine().lower() in {"arm64", "aarch64"}
+    environment = target / ("mlx-voice-venv" if use_mlx else "chatterbox-venv")
     target.mkdir(parents=True, exist_ok=True)
     if not environment.exists():
         print(f"Creating isolated environment: {environment}")
         venv.EnvBuilder(with_pip=True).create(environment)
     python = environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-    print("Installing the local Chatterbox speech engine…")
-    subprocess.run([str(python), "-m", "pip", "install", "chatterbox-tts==0.1.7"], check=True)
+    if use_mlx:
+        print("Installing the Apple Silicon MLX voice engine…")
+        subprocess.run([str(python), "-m", "pip", "install", "mlx-audio==0.6.3"], check=True)
+    else:
+        print("Installing the portable Chatterbox speech engine…")
+        subprocess.run([str(python), "-m", "pip", "install", "chatterbox-tts==0.1.7"], check=True)
 
     if args.voice:
         source = args.voice.expanduser().resolve()

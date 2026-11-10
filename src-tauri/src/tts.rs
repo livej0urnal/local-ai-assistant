@@ -63,6 +63,10 @@ fn python_executable(directory: &Path) -> Option<PathBuf> {
         vec![directory.join("chatterbox-venv/Scripts/python.exe")]
     } else {
         vec![
+            // На Apple Silicon установщик создаёт MLX-окружение. Оно идёт
+            // первым, но его отсутствие никак не мешает Intel/macOS и Linux.
+            directory.join("mlx-voice-venv/bin/python"),
+            directory.join("mlx-voice-venv/bin/python3.11"),
             directory.join("chatterbox-venv/bin/python"),
             directory.join("chatterbox-venv/bin/python3.11"),
         ]

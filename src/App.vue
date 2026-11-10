@@ -7,7 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import droidPortrait from "./assets/protocol-droid.png";
-import { assistantPhrase, moviePhrase, voiceDemoPhrases } from "./assistantPhrases";
+import { assistantPhrase, moviePhrase } from "./assistantPhrases";
 import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
 
 type Message = {
@@ -1823,14 +1823,15 @@ async function speak(text: string) {
 }
 
 async function testVoice() {
-  const situations: PrivateVoicePhrase["category"][] = ["introduction", "success", "warning", "error", "shutdown"];
-  if (await playPrivateVoice(situations[voiceDemoIndex % situations.length])) {
-    voiceDemoIndex += 1;
-    addMessage("assistant", lastCommand.value);
-    return;
-  }
+  // Проверяем тот же тракт, которым озвучиваются реальные ответы, а не
+  // заранее нарезанный каталог ситуационных фраз.
+  const russianSamples = [
+    "Здравствуйте. Я Си-три-пи-о. Проверяю тембр, темп и естественность своей речи.",
+    "Google Chrome найден среди установленных приложений. Я готов открыть его по вашей команде.",
+    "Сегодня я говорю спокойнее, делаю логичные паузы и не зачитываю служебную разметку.",
+  ];
   const phrase = commandLanguage.value === "ru"
-    ? voiceDemoPhrases[voiceDemoIndex % voiceDemoPhrases.length]
+    ? russianSamples[voiceDemoIndex % russianSamples.length]
     : commandText("greeting");
   voiceDemoIndex += 1;
   lastCommand.value = phrase;

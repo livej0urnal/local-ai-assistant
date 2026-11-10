@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isPermissionGranted as isNotificationPermissionGranted,
+  requestPermission as requestNotificationPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import droidPortrait from "./assets/protocol-droid.png";
 import { assistantPhrase, moviePhrase, voiceDemoPhrases } from "./assistantPhrases";
 import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
@@ -477,6 +482,7 @@ let voiceDemoIndex = 0;
 let privateVoiceIndex = 0;
 let privateVoiceAudio: HTMLAudioElement | null = null;
 let privateVoicePlaying = false;
+const notificationPermission = ref<"granted" | "denied" | "prompt">("prompt");
 const microphonePermissionStorageKey = "c3po.microphone-permission";
 
 function savedMicrophonePermission(): PermissionState | null {
@@ -571,6 +577,31 @@ function formatBytes(bytes: number) {
   if (absolute < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} КБ`;
   if (absolute >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} ГБ`;
   return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+}
+
+async function ensureNotificationPermission() {
+  if (!("__TAURI_INTERNALS__" in window)) return false;
+  try {
+    if (await isNotificationPermissionGranted()) {
+      notificationPermission.value = "granted";
+      return true;
+    }
+    const state = await requestNotificationPermission();
+    notificationPermission.value = state === "granted" ? "granted" : "denied";
+    return state === "granted";
+  } catch (error) {
+    await writeLog("warn", "notification.permission", `Не удалось запросить уведомления: ${String(error)}`);
+    return false;
+  }
+}
+
+async function notifyFromBackground(body: string) {
+  if (document.visibilityState === "visible" || !(await ensureNotificationPermission())) return;
+  sendNotification({
+    title: "C-3PO",
+    body: body.trim().slice(0, 500),
+  });
+  await writeLog("info", "notification.background", "Ответ показан системным уведомлением");
 }
 
 async function loadPrivateVoiceCatalog() {
@@ -974,7 +1005,7 @@ async function handleRecognizedSpeech(text: string) {
   if (privateVoicePlaying) return;
   // Системные распознаватели записывают имя по-разному, поэтому принимаем
   // латинское C-3PO и наиболее частые русские транскрипции.
-  const wakeWord = /(?:\bc\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|\bc3po\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио)/iu;
+  const wakeWord = /(?:\bc\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|\bc3po\b|\bс\s*[- ]?3\s*[- ]?п\s*[- ]?о\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио)/iu;
   const wakeMatch = text.match(wakeWord);
 
   if (!wakeMatch) {
@@ -984,13 +1015,15 @@ async function handleRecognizedSpeech(text: string) {
     return;
   }
 
-  if ("__TAURI_INTERNALS__" in window) {
-    await invoke("show_main_window");
-  }
   const command = text.replace(wakeWord, "").replace(/^[,.:;!?\s-]+/u, "").trim();
   if (command) {
-    processVoiceCommand(command);
+    // Полная команда с именем выполняется в фоне. Окно не прыгает поверх
+    // текущей работы пользователя, а результат приходит уведомлением macOS.
+    const isBackgroundCommand = document.visibilityState !== "visible";
+    if (isBackgroundCommand) void notifyFromBackground("Слышу вас. Минутку, я советуюсь с R2-D2…");
+    processVoiceCommand(command, isBackgroundCommand);
   } else {
+    if ("__TAURI_INTERNALS__" in window) await invoke("show_main_window");
     liveTranscript.value = "";
     lastCommand.value = t("listening");
     voiceState.value = "listening";
@@ -1311,7 +1344,7 @@ async function approveAction() {
   }
 }
 
-function processVoiceCommand(text: string) {
+function processVoiceCommand(text: string, notifyInBackground = false) {
   const normalized = text.toLowerCase();
   const localizedSystemCommand = commandText("systemCommand").toLowerCase();
   const localizedChatCommand = commandText("chatCommand").toLowerCase();
@@ -1339,9 +1372,11 @@ function processVoiceCommand(text: string) {
   }
   if (normalized.includes(localizedSystemCommand) || /(систем|компьютер|операцион|памят|процессор)/.test(normalized)) {
     proposeSystemInfo();
+    if (notifyInBackground) void notifyFromBackground("Для показа системной информации нужно ваше подтверждение. Откройте C-3PO.");
     return;
   }
   if (normalized.includes(localizedChatCommand) || /(открой|покажи).*(чат|диалог)/.test(normalized)) {
+    if (notifyInBackground && "__TAURI_INTERNALS__" in window) void invoke("show_main_window");
     chatOpen.value = true;
     const response = assistantPhrase("chatOpened");
     addMessage("assistant", response);
@@ -1355,13 +1390,16 @@ function processVoiceCommand(text: string) {
   }
 
   if (llmStatus.value?.state === "ready") {
-    void askLocalModel(text);
+    void askLocalModel(text).then((reply) => {
+      if (notifyInBackground && reply) void notifyFromBackground(reply);
+    });
     return;
   }
 
   const response = `${moviePhrase("unknownBehavior")} Сейчас доступна информация о системе.`;
   addMessage("assistant", response);
   speak(response);
+  if (notifyInBackground) void notifyFromBackground(response);
 }
 
 function submitMessage() {
@@ -1438,6 +1476,7 @@ onMounted(async () => {
   saveInterfaceLanguage();
   saveCommandLanguage();
   await loadEnvironment();
+  await ensureNotificationPermission();
   await loadPrivateVoiceCatalog();
   await loadLlmStatus();
   configureRecognition();

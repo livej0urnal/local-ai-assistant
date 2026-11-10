@@ -129,6 +129,7 @@ type EnvironmentReport = {
 type PermissionState = "checking" | "prompt" | "granted" | "denied" | "unsupported";
 type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "paused" | "error";
 type ThemePreference = "system" | "light" | "dark";
+type VoiceMode = "adaptive" | "instant" | "personal";
 
 type AppError = {
   title: string;
@@ -177,6 +178,10 @@ const commandLanguage = ref<LanguageCode>(isLanguageCode(storedCommandLanguage) 
 const storedTheme = window.localStorage.getItem("c3po.theme");
 const themePreference = ref<ThemePreference>(storedTheme === "light" || storedTheme === "dark" ? storedTheme : "system");
 const silentMode = ref(window.localStorage.getItem("c3po.silent-mode") === "true");
+const storedVoiceMode = window.localStorage.getItem("c3po.voice-mode");
+const voiceMode = ref<VoiceMode>(
+  storedVoiceMode === "instant" || storedVoiceMode === "personal" ? storedVoiceMode : "adaptive",
+);
 const systemDarkMode = window.matchMedia("(prefers-color-scheme: dark)");
 
 function applyTheme() {
@@ -279,6 +284,19 @@ const silentModeLabels: Record<LanguageCode, { title: string; description: strin
   zh: { title: "静音模式", description: "仅文字聊天，不使用麦克风和语音" },
   ja: { title: "サイレントモード", description: "マイクと音声を使わずテキストチャットのみ" },
   ar: { title: "الوضع الصامت", description: "دردشة نصية فقط دون ميكروفون أو صوت" },
+};
+
+const voiceModeLabels: Record<LanguageCode, { title: string; adaptive: string; instant: string; personal: string }> = {
+  ru: { title: "Режим голоса", adaptive: "Авто", instant: "Быстрый", personal: "Мой голос" },
+  en: { title: "Voice mode", adaptive: "Auto", instant: "Fast", personal: "My voice" },
+  es: { title: "Modo de voz", adaptive: "Auto", instant: "Rápido", personal: "Mi voz" },
+  de: { title: "Sprachmodus", adaptive: "Auto", instant: "Schnell", personal: "Meine Stimme" },
+  fr: { title: "Mode vocal", adaptive: "Auto", instant: "Rapide", personal: "Ma voix" },
+  it: { title: "Modalità voce", adaptive: "Auto", instant: "Rapida", personal: "La mia voce" },
+  pt: { title: "Modo de voz", adaptive: "Auto", instant: "Rápido", personal: "Minha voz" },
+  zh: { title: "语音模式", adaptive: "自动", instant: "快速", personal: "我的声音" },
+  ja: { title: "音声モード", adaptive: "自動", instant: "高速", personal: "自分の声" },
+  ar: { title: "وضع الصوت", adaptive: "تلقائي", instant: "سريع", personal: "صوتي" },
 };
 
 function introductionPrompt(language: LanguageCode) {
@@ -1233,6 +1251,7 @@ function startAudioMeter(stream: MediaStream) {
 function interruptAssistantSpeech() {
   if (voiceState.value !== "speaking") return;
   speechRunId += 1;
+  window.speechSynthesis?.cancel();
   stopGeneratedSpeech?.();
   stopPrivateVoiceSpeech?.();
   privateVoiceAudio?.pause();
@@ -1481,6 +1500,41 @@ async function playGeneratedSpeech(blob: Blob, runId: number) {
   });
 }
 
+async function playSystemSpeech(text: string, runId: number) {
+  if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+    throw new Error("Системная озвучка недоступна");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let finished = false;
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = selectedCommandLanguage.value.speechCode;
+    utterance.rate = 0.96;
+    utterance.pitch = 0.92;
+    const languagePrefix = utterance.lang.toLowerCase().split("-")[0];
+    utterance.voice = window.speechSynthesis.getVoices().find(
+      (voice) => voice.lang.toLowerCase().startsWith(languagePrefix),
+    ) ?? null;
+
+    const finish = (error?: unknown) => {
+      if (finished) return;
+      finished = true;
+      stopGeneratedSpeech = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    stopGeneratedSpeech = () => {
+      window.speechSynthesis.cancel();
+      finish();
+    };
+    utterance.onend = () => finish();
+    utterance.onerror = (event) => finish(new Error(`Системная озвучка: ${event.error}`));
+    if (runId !== speechRunId) return finish();
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
 async function speak(text: string) {
   if (silentMode.value || !text.trim()) return;
   stopGeneratedSpeech?.();
@@ -1502,6 +1556,23 @@ async function speak(text: string) {
   };
 
   try {
+    // Быстрый режим использует уже установленный в ОС движок и поэтому
+    // подходит даже слабым компьютерам. В «Авто» личные записанные реплики
+    // сохраняются, а произвольный длинный ответ начинается без ожидания ИИ-TTS.
+    if (voiceMode.value !== "personal" && "speechSynthesis" in window) {
+      await writeLog("info", "tts.system", "Быстрая озвучка ответа системным голосом", {
+        characters: text.length,
+        language: commandLanguage.value,
+        mode: voiceMode.value,
+      });
+      await playSystemSpeech(text.slice(0, 1200), runId);
+      selectedVoiceName.value = voiceMode.value === "adaptive"
+        ? "Авто · быстрый голос"
+        : "Быстрый системный голос";
+      if (runId === speechRunId) restoreVoiceState();
+      return;
+    }
+
     if (!(await ensureTtsServer()) || !ttsStatus.value) {
       throw new Error(ttsStatus.value?.message ?? "Локальный голосовой компонент не установлен");
     }
@@ -1805,6 +1876,20 @@ function selectTheme(theme: ThemePreference) {
   applyTheme();
 }
 
+function selectVoiceMode(mode: VoiceMode) {
+  voiceMode.value = mode;
+  window.localStorage.setItem("c3po.voice-mode", mode);
+  selectedVoiceName.value = mode === "personal"
+    ? "Локальный голос пользователя"
+    : (mode === "instant" ? "Быстрый системный голос" : "Авто · быстрый голос");
+  // Смена режима также должна немедленно остановить предыдущую озвучку.
+  speechRunId += 1;
+  window.speechSynthesis?.cancel();
+  stopGeneratedSpeech?.();
+  stopPrivateVoiceSpeech?.();
+  if (mode === "personal") void ensureTtsServer();
+}
+
 async function toggleSilentMode() {
   silentMode.value = !silentMode.value;
   window.localStorage.setItem("c3po.silent-mode", String(silentMode.value));
@@ -1845,15 +1930,22 @@ onMounted(async () => {
     if (ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound) {
       synthesisAvailable.value = true;
       selectedVoiceName.value = "Локальный голос пользователя";
-      // Запускаем локальный процесс заранее. Пока пользователь слушает
-      // приветствие и формулирует вопрос, Chatterbox загружает веса с диска.
-      void ensureTtsServer();
+      if (voiceMode.value === "personal") {
+        // Тяжёлую модель запускаем только по явному выбору пользователя.
+        // Быстрый и автоматический режимы не расходуют память на Chatterbox.
+        void ensureTtsServer();
+      }
     }
   }
   configureRecognition();
   if (privateVoiceCatalog.value && !(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound)) {
     synthesisAvailable.value = true;
     selectedVoiceName.value = "Локальный пакет voice.mp3";
+  }
+  if (voiceMode.value !== "personal") {
+    selectedVoiceName.value = voiceMode.value === "instant"
+      ? "Быстрый системный голос"
+      : "Авто · быстрый голос";
   }
   await refreshProcessMetrics();
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
@@ -2147,6 +2239,20 @@ onBeforeUnmount(() => {
               <button type="button" :class="{ active: themePreference === 'light' }" @click="selectTheme('light')">☀ <span>{{ settingsLabels[interfaceLanguage].light }}</span></button>
               <button type="button" :class="{ active: themePreference === 'dark' }" @click="selectTheme('dark')">● <span>{{ settingsLabels[interfaceLanguage].dark }}</span></button>
             </div>
+          </section>
+
+          <section class="settings-section">
+            <span class="settings-section-title">{{ voiceModeLabels[interfaceLanguage].title }}</span>
+            <div class="theme-selector voice-mode-selector">
+              <button type="button" :class="{ active: voiceMode === 'adaptive' }" @click="selectVoiceMode('adaptive')">◈ <span>{{ voiceModeLabels[interfaceLanguage].adaptive }}</span></button>
+              <button type="button" :class="{ active: voiceMode === 'instant' }" @click="selectVoiceMode('instant')">⚡ <span>{{ voiceModeLabels[interfaceLanguage].instant }}</span></button>
+              <button type="button" :class="{ active: voiceMode === 'personal' }" @click="selectVoiceMode('personal')">♫ <span>{{ voiceModeLabels[interfaceLanguage].personal }}</span></button>
+            </div>
+            <small class="settings-hint">
+              {{ voiceMode === 'personal'
+                ? 'Точный голос из вашего образца: качественнее, но требует мощного компьютера.'
+                : 'Ответ начинается сразу и не требует загрузки тяжёлой голосовой модели.' }}
+            </small>
           </section>
 
           <button class="settings-toggle" type="button" :class="{ active: silentMode }" @click="toggleSilentMode">

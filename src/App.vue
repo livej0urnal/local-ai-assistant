@@ -1034,10 +1034,14 @@ async function askLocalModel(prompt: string, showInConversation = true, toolCont
     return "";
   } finally {
     // Даже быстрый ответ или ошибка не должны превращать появление R2-D2 в
-    // незаметную вспышку. В открытом диалоге сцена держится минимум 1,5 с.
+    // незаметную вспышку. Сначала гарантируем минимальное время показа, затем
+    // оставляем сцену рядом с уже появившимся ответом ещё на две секунды.
+    // Так пользователь видит именно передачу ответа от R2-D2 к C-3PO.
     if (chatOpen.value) {
       const remaining = 1_500 - (performance.now() - consultationStartedAt);
       if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+      await scrollChat("smooth");
+      await new Promise((resolve) => window.setTimeout(resolve, 2_000));
     }
     isConsultingR2.value = false;
     isWorking.value = false;

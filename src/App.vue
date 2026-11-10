@@ -167,6 +167,7 @@ type RecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
   onstart: (() => void) | null;
+  onspeechstart: (() => void) | null;
   onend: (() => void) | null;
   onerror: ((event: { error: string }) => void) | null;
   onresult: ((event: { resultIndex: number; results: RecognitionResultList }) => void) | null;
@@ -785,9 +786,11 @@ async function playPrivateVoice(
   // выбрал C-3PO, даже если системный аудиовыход временно недоступен.
   if (replaceCaption) lastCommand.value = phrase.text;
   const resumeListening = shouldListen;
-  shouldListen = false;
   privateVoicePlaying = true;
-  recognition?.stop();
+  // Не выключаем распознавание во время ответа: событие speechstart позволяет
+  // оборвать C-3PO сразу, как только пользователь начинает говорить.
+  shouldListen = resumeListening;
+  if (!resumeListening) recognition?.stop();
   voiceState.value = "speaking";
 
   const restoreVoiceState = () => {
@@ -1201,7 +1204,18 @@ function configureRecognition() {
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.onstart = () => {
-    voiceState.value = "listening";
+    if (voiceState.value !== "speaking") voiceState.value = "listening";
+  };
+  recognition.onspeechstart = () => {
+    // Web Speech уже отличил человеческую речь от обычного фонового шума.
+    // Короткая защита нужна только от звука включения самого динамика.
+    if (
+      voiceState.value === "speaking"
+      && assistantSpeechStartedAt > 0
+      && performance.now() - assistantSpeechStartedAt > 250
+    ) {
+      interruptAssistantSpeech("speech-recognition");
+    }
   };
   recognition.onend = () => {
     if (shouldListen && voiceState.value !== "speaking") {
@@ -1226,7 +1240,6 @@ function configureRecognition() {
     }
   };
   recognition.onresult = (event) => {
-    if (privateVoicePlaying) return;
     let finalText = "";
     let interimText = "";
 
@@ -1234,6 +1247,17 @@ function configureRecognition() {
       const result = event.results[index];
       if (result.isFinal) finalText += result[0].transcript;
       else interimText += result[0].transcript;
+    }
+
+    const recognizedText = (interimText || finalText).trim();
+    // Некоторые WebView не присылают speechstart, но уже отдают промежуточный
+    // текст. Это второй надёжный сигнал, что человек заговорил поверх ответа.
+    if (privateVoicePlaying && recognizedText) {
+      if (assistantSpeechStartedAt > 0 && performance.now() - assistantSpeechStartedAt > 250) {
+        interruptAssistantSpeech("recognized-text");
+      } else {
+        return;
+      }
     }
 
     liveTranscript.value = interimText || finalText;
@@ -1266,26 +1290,38 @@ function startAudioMeter(stream: MediaStream) {
   audioContext = new AudioContext();
   const analyser = audioContext.createAnalyser();
   const source = audioContext.createMediaStreamSource(stream);
-  const samples = new Uint8Array(analyser.frequencyBinCount);
-  analyser.fftSize = 256;
+  const samples = new Uint8Array(512);
+  let noiseFloor = 0.012;
+  analyser.fftSize = 512;
   source.connect(analyser);
 
   const update = () => {
-    analyser.getByteFrequencyData(samples);
-    const average = samples.reduce((sum, value) => sum + value, 0) / samples.length;
-    audioLevel.value = Math.min(1, average / 55);
+    analyser.getByteTimeDomainData(samples);
+    const meanSquare = samples.reduce((sum, value) => {
+      const normalized = (value - 128) / 128;
+      return sum + normalized * normalized;
+    }, 0) / samples.length;
+    const rms = Math.sqrt(meanSquare);
+    audioLevel.value = Math.min(1, rms * 8);
+
+    // В паузах запоминаем обычный шум комнаты. Поэтому тихая речь рядом с
+    // микрофоном срабатывает, а постоянный гул вентилятора — нет.
+    if (voiceState.value !== "speaking") {
+      noiseFloor = noiseFloor * 0.96 + rms * 0.04;
+    }
+    const speechThreshold = Math.max(0.028, noiseFloor * 2.35);
 
     // Barge-in: echoCancellation подавляет собственный голос C-3PO, а
-    // устойчивый уровень поверх порога считаем новой речью пользователя.
-    // Небольшая задержка после старта не даёт первому аудиопику оборвать себя.
+    // короткий устойчивый голосовой пик служит резервом для WebView, который
+    // не поддерживает событие speechstart.
     if (
       voiceState.value === "speaking"
       && assistantSpeechStartedAt > 0
-      && performance.now() - assistantSpeechStartedAt > 650
-      && audioLevel.value >= 0.32
+      && performance.now() - assistantSpeechStartedAt > 300
+      && rms >= speechThreshold
     ) {
       if (!bargeInStartedAt) bargeInStartedAt = performance.now();
-      else if (performance.now() - bargeInStartedAt >= 220) interruptAssistantSpeech();
+      else if (performance.now() - bargeInStartedAt >= 90) interruptAssistantSpeech("audio-meter");
     } else {
       bargeInStartedAt = 0;
     }
@@ -1294,7 +1330,7 @@ function startAudioMeter(stream: MediaStream) {
   update();
 }
 
-function interruptAssistantSpeech() {
+function interruptAssistantSpeech(source: "speech-recognition" | "recognized-text" | "audio-meter" = "audio-meter") {
   if (voiceState.value !== "speaking") return;
   speechRunId += 1;
   window.speechSynthesis?.cancel();
@@ -1312,7 +1348,7 @@ function interruptAssistantSpeech() {
   } else {
     voiceState.value = "idle";
   }
-  void writeLog("info", "voice.barge-in", "Озвучка остановлена новой речью пользователя");
+  void writeLog("info", "voice.barge-in", "Озвучка остановлена новой речью пользователя", { source });
 }
 
 async function countMicrophones() {
@@ -1607,9 +1643,11 @@ async function speak(text: string) {
   stopGeneratedSpeech?.();
   const runId = ++speechRunId;
   const resumeListening = shouldListen;
-  shouldListen = false;
   privateVoicePlaying = true;
-  recognition?.stop();
+  // Слушаем параллельно с озвучкой. echoCancellation убирает голос из
+  // динамиков, а речь пользователя немедленно запускает barge-in.
+  shouldListen = resumeListening;
+  if (!resumeListening) recognition?.stop();
   voiceState.value = "speaking";
   assistantSpeechStartedAt = performance.now();
 
@@ -1796,13 +1834,13 @@ async function openKnownApplication(application: string) {
 async function answerWeatherQuestion(question: string, notifyInBackground: boolean) {
   isWorking.value = true;
   voiceState.value = "thinking";
-  lastCommand.value = "Сверяюсь с системным приложением «Погода»…";
+  lastCommand.value = "Получаю актуальную погоду в фоновом режиме…";
   try {
     if (!("__TAURI_INTERNALS__" in window)) {
-      throw new Error("Системная погода доступна только в приложении C-3PO");
+      throw new Error("Фоновая погода доступна только в приложении C-3PO");
     }
     const report = await invoke<WeatherReport>("get_current_weather");
-    await writeLog("info", "tool.weather", "Получена актуальная сводка из системного приложения", {
+    await writeLog("info", "tool.weather", "Получена актуальная сводка в фоновом режиме", {
       source: report.source,
       characters: report.summary.length,
     });
@@ -1815,7 +1853,7 @@ async function answerWeatherQuestion(question: string, notifyInBackground: boole
 
     // Даже если локальная LLM временно не загрузилась, показываем реальные
     // данные инструмента, а не придумываем погоду.
-    const fallback = `${report.summary}. Источник: приложение «Погода».`;
+    const fallback = `${report.summary}. Источник: ${report.source}.`;
     addMessage("assistant", fallback);
     lastCommand.value = fallback;
     speak(fallback);

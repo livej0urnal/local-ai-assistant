@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,63 +120,86 @@ pub(crate) fn open_application(application: String) -> Result<ActionResult, Stri
     })
 }
 
-#[cfg(target_os = "macos")]
-fn read_current_weather() -> Result<WeatherReport, String> {
-    // Weather не предоставляет обычный локальный API. Читаем только одну
-    // доступную AXDescription текущего местоположения; кликов и изменений нет.
-    const SCRIPT: &str = r#"
-const weather = Application("Weather");
-weather.activate();
-delay(1.5);
-const process = Application("System Events").processes.byName("Weather");
-function attribute(element, name) {
-  try { return element.attributes.byName(name).value(); } catch (_) { return null; }
-}
-function findCurrent(element, depth) {
-  if (depth > 30) return null;
-  const description = attribute(element, "AXDescription");
-  if (description && String(description).includes("градус") &&
-      (String(description).includes("ТЕКУЩЕЕ МЕСТО") || String(description).includes("CURRENT LOCATION"))) {
-    return String(description);
-  }
-  let children = [];
-  try { children = element.uiElements(); } catch (_) { return null; }
-  for (const child of children) {
-    const result = findCurrent(child, depth + 1);
-    if (result) return result;
-  }
-  return null;
-}
-const summary = findCurrent(process.windows[0], 0);
-if (!summary) throw new Error("current weather was not found");
-console.log(summary);
-"#;
-    let output = Command::new("/usr/bin/osascript")
-        .args(["-l", "JavaScript", "-e", SCRIPT])
-        .output()
-        .map_err(|error| format!("Не удалось прочитать приложение «Погода»: {error}"))?;
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if error.contains("not allowed assistive access") || error.contains("-25211") {
-            return Err("macOS не разрешила чтение приложения «Погода». Разрешите C-3PO в Системные настройки → Конфиденциальность и безопасность → Универсальный доступ.".to_string());
+fn first_text(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+        if let Some(items) = current.as_array() {
+            current = items.first()?;
         }
-        return Err(format!(
-            "Приложение «Погода» не отдало текущие данные: {error}"
-        ));
     }
-    let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if summary.is_empty() {
-        return Err("Приложение «Погода» вернуло пустую сводку".to_string());
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn weather_report_from_payload(payload: &serde_json::Value) -> Result<WeatherReport, String> {
+    // Некоторые версии wttr.in оборачивают прежний ответ в поле data.
+    let data = payload.get("data").unwrap_or(payload);
+    let current = data
+        .get("current_condition")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.first())
+        .ok_or_else(|| "Сервис погоды не вернул текущие условия".to_string())?;
+    let area = data
+        .get("nearest_area")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.first());
+
+    let city = area
+        .and_then(|value| first_text(value, &["areaName", "value"]))
+        .unwrap_or_else(|| "текущее местоположение".to_string());
+    let country = area.and_then(|value| first_text(value, &["country", "value"]));
+    let place = country.map_or(city.clone(), |country| format!("{city}, {country}"));
+    let temperature = first_text(current, &["temp_C"])
+        .ok_or_else(|| "Сервис погоды не вернул температуру".to_string())?;
+    let feels_like = first_text(current, &["FeelsLikeC"]);
+    let humidity = first_text(current, &["humidity"]);
+    let wind = first_text(current, &["windspeedKmph"]);
+    let description = first_text(current, &["lang_ru", "value"])
+        .or_else(|| first_text(current, &["weatherDesc", "value"]))
+        .unwrap_or_else(|| "условия не указаны".to_string());
+    let observed_at = first_text(current, &["localObsDateTime"]);
+
+    let mut details = vec![format!("{place}: {description}, {temperature} °C")];
+    if let Some(value) = feels_like {
+        details.push(format!("ощущается как {value} °C"));
     }
+    if let Some(value) = humidity {
+        details.push(format!("влажность {value}%"));
+    }
+    if let Some(value) = wind {
+        details.push(format!("ветер {value} км/ч"));
+    }
+    if let Some(value) = observed_at {
+        details.push(format!("наблюдение {value}"));
+    }
+
     Ok(WeatherReport {
-        source: "macOS Weather".to_string(),
-        summary,
+        source: "wttr.in (местоположение определено по сети)".to_string(),
+        summary: details.join(", "),
     })
 }
 
-#[cfg(not(target_os = "macos"))]
 fn read_current_weather() -> Result<WeatherReport, String> {
-    Err("Чтение системной погоды пока подключено только на macOS. На Windows C-3PO может открыть приложение «Погода».".to_string())
+    // Фоновый HTTPS-запрос не запускает системное приложение и не требует
+    // доступа к экрану. Сервис видит обычный сетевой адрес, но не текст команды.
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(12)))
+        .build()
+        .new_agent();
+    let mut response = agent
+        .get("https://wttr.in/?format=j1&lang=ru")
+        .header("User-Agent", "C-3PO-local-assistant/0.1")
+        .call()
+        .map_err(|error| format!("Фоновый сервис погоды недоступен: {error}"))?;
+    let payload: serde_json::Value = response
+        .body_mut()
+        .read_json()
+        .map_err(|error| format!("Не удалось прочитать ответ сервиса погоды: {error}"))?;
+    weather_report_from_payload(&payload)
 }
 
 #[tauri::command]
@@ -275,6 +299,29 @@ pub(crate) fn send_telegram_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_background_weather_response() {
+        let payload = serde_json::json!({
+            "current_condition": [{
+                "temp_C": "18",
+                "FeelsLikeC": "17",
+                "humidity": "61",
+                "windspeedKmph": "9",
+                "weatherDesc": [{ "value": "Partly cloudy" }],
+                "localObsDateTime": "2026-11-10 07:00 PM"
+            }],
+            "nearest_area": [{
+                "areaName": [{ "value": "Podgorica" }],
+                "country": [{ "value": "Montenegro" }]
+            }]
+        });
+
+        let report = weather_report_from_payload(&payload).expect("weather report");
+        assert!(report.summary.contains("Podgorica, Montenegro"));
+        assert!(report.summary.contains("18 °C"));
+        assert!(report.summary.contains("влажность 61%"));
+    }
 
     #[test]
     fn resolves_only_known_application_aliases() {

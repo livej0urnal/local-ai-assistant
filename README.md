@@ -228,6 +228,9 @@ local-ai-assistant/
 └── README.md
 ```
 
+План легального подключения лицензированного или оригинального голоса описан в
+[`docs/VOICE.md`](docs/VOICE.md).
+
 ## Документация
 
 - [Архитектура](docs/ARCHITECTURE.md)

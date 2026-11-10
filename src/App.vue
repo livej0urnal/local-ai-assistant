@@ -80,6 +80,17 @@ type LlmRuntimeStatus = {
   message: string;
 };
 
+type TtsStatus = {
+  state: "runtime-missing" | "reference-missing" | "stopped" | "starting" | "running";
+  runtimeFound: boolean;
+  referenceFound: boolean;
+  processId: number | null;
+  address: string;
+  dataDirectory: string;
+  referencePath: string | null;
+  message: string;
+};
+
 type LocalReply = {
   text: string;
   model?: string;
@@ -476,6 +487,7 @@ const recognitionBlockedReason = ref("");
 const llmStatus = ref<LlmStatus | null>(null);
 const llmLoading = ref(false);
 const llmRuntime = ref<LlmRuntimeStatus | null>(null);
+const ttsStatus = ref<TtsStatus | null>(null);
 const llmTestReply = ref("");
 const modelPreference = ref(window.localStorage.getItem("c3po.model-preference") || "auto");
 const privateVoiceCatalog = ref<PrivateVoiceCatalog | null>(null);
@@ -491,6 +503,8 @@ let memoryTimer = 0;
 let voiceDemoIndex = 0;
 let privateVoiceIndex = 0;
 let privateVoiceAudio: HTMLAudioElement | null = null;
+let generatedVoiceAudio: HTMLAudioElement | null = null;
+let generatedVoiceUrl = "";
 let privateVoicePlaying = false;
 const notificationPermission = ref<"granted" | "denied" | "prompt">("prompt");
 const microphonePermissionStorageKey = "c3po.microphone-permission";
@@ -673,6 +687,7 @@ async function playPrivateVoice(
   const phrase = candidates[privateVoiceIndex % candidates.length];
   privateVoiceIndex += 1;
   privateVoiceAudio?.pause();
+  generatedVoiceAudio?.pause();
   privateVoiceAudio = new Audio(`./private-audio/${phrase.file}`);
   privateVoiceAudio.preload = "auto";
   privateVoiceAudio.autoplay = true;
@@ -718,15 +733,6 @@ async function playPrivateVoice(
     await writeLog("warn", "voice.private-pack", `Не удалось воспроизвести ${phrase.id}: ${String(error)}`);
     return false;
   }
-}
-
-function voiceReactionFor(text: string): PrivateVoicePhrase["category"] {
-  const normalized = text.toLowerCase();
-  if (/(ошиб|не удалось|недоступ|авари|error|failed)/u.test(normalized)) return "error";
-  if (/(разреш|подтверд|опас|риск|вниматель|permission)/u.test(normalized)) return "warning";
-  if (/(подожд|минут|дума|анализ|советуюсь|wait)/u.test(normalized)) return "waiting";
-  if (/(знаком|представ|привет|hello)/u.test(normalized)) return "introduction";
-  return "success";
 }
 
 async function loadLlmStatus() {
@@ -1315,11 +1321,80 @@ async function toggleMicrophone() {
   await requestMicrophone();
 }
 
-function speak(text: string) {
-  if (silentMode.value) return;
-  // Произвольный ответ остаётся видимым в чате, а голосовой пакет отвечает
-  // уместной готовой репликой. Системный «старый» голос больше не используется.
-  void playPrivateVoice(voiceReactionFor(text), false);
+async function waitForTtsServer() {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    ttsStatus.value = await invoke<TtsStatus>("get_tts_status");
+    if (ttsStatus.value.state === "running") return true;
+    if (ttsStatus.value.state === "runtime-missing" || ttsStatus.value.state === "reference-missing") return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function ensureTtsServer() {
+  if (!("__TAURI_INTERNALS__" in window)) return false;
+  try {
+    ttsStatus.value = await invoke<TtsStatus>("get_tts_status");
+    if (ttsStatus.value.state === "running") return true;
+    if (!ttsStatus.value.runtimeFound || !ttsStatus.value.referenceFound) return false;
+    ttsStatus.value = await invoke<TtsStatus>("start_tts");
+    return await waitForTtsServer();
+  } catch (error) {
+    const details = errorDetails(error);
+    await writeLog("error", "tts.start", `${details.name}: ${details.message}`);
+    return false;
+  }
+}
+
+async function speak(text: string) {
+  if (silentMode.value || !text.trim()) return;
+  const resumeListening = shouldListen;
+  shouldListen = false;
+  privateVoicePlaying = true;
+  recognition?.stop();
+  voiceState.value = "speaking";
+
+  const restoreVoiceState = () => {
+    privateVoicePlaying = false;
+    const canResume = resumeListening && microphonePermission.value === "granted" && !silentMode.value;
+    voiceState.value = canResume ? "listening" : (silentMode.value ? "paused" : "idle");
+    if (canResume) startRecognition();
+  };
+
+  try {
+    if (!(await ensureTtsServer()) || !ttsStatus.value) {
+      throw new Error(ttsStatus.value?.message ?? "Локальный голосовой компонент не установлен");
+    }
+    await writeLog("info", "tts.synthesize", "Начата локальная озвучка полного ответа", {
+      characters: text.length,
+      language: commandLanguage.value,
+    });
+    const response = await fetch(`${ttsStatus.value.address}/synthesize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text.slice(0, 1200), language: commandLanguage.value }),
+    });
+    if (!response.ok) {
+      const details = await response.text();
+      throw new Error(`Голосовой движок вернул ${response.status}: ${details.slice(0, 500)}`);
+    }
+    generatedVoiceAudio?.pause();
+    if (generatedVoiceUrl) URL.revokeObjectURL(generatedVoiceUrl);
+    generatedVoiceUrl = URL.createObjectURL(await response.blob());
+    generatedVoiceAudio = new Audio(generatedVoiceUrl);
+    generatedVoiceAudio.volume = 0.92;
+    generatedVoiceAudio.onended = restoreVoiceState;
+    generatedVoiceAudio.onerror = restoreVoiceState;
+    await generatedVoiceAudio.play();
+    synthesisAvailable.value = true;
+    selectedVoiceName.value = "Локальный голос пользователя";
+  } catch (error) {
+    restoreVoiceState();
+    const details = errorDetails(error);
+    await writeLog("error", "tts.synthesize", `${details.name}: ${details.message}`);
+    // Ответ уже находится в чате. Не подменяем его случайной заготовленной
+    // фразой: при проблеме с TTS пользователь всё равно получает точный текст.
+  }
 }
 
 async function testVoice() {
@@ -1496,6 +1571,7 @@ async function toggleSilentMode() {
     pauseMicrophone();
     window.speechSynthesis?.cancel();
     privateVoiceAudio?.pause();
+    generatedVoiceAudio?.pause();
     return;
   }
   if (await hasRememberedMicrophoneApproval()) await requestMicrophone();
@@ -1520,8 +1596,15 @@ onMounted(async () => {
   await ensureNotificationPermission();
   await loadPrivateVoiceCatalog();
   await loadLlmStatus();
+  if ("__TAURI_INTERNALS__" in window) {
+    ttsStatus.value = await invoke<TtsStatus>("get_tts_status").catch(() => null);
+    if (ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound) {
+      synthesisAvailable.value = true;
+      selectedVoiceName.value = "Локальный голос пользователя";
+    }
+  }
   configureRecognition();
-  if (privateVoiceCatalog.value) {
+  if (privateVoiceCatalog.value && !(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound)) {
     synthesisAvailable.value = true;
     selectedVoiceName.value = "Локальный пакет voice.mp3";
   }
@@ -1542,6 +1625,8 @@ onBeforeUnmount(() => {
   audioContext?.close();
   droidAudioContext?.close();
   privateVoiceAudio?.pause();
+  generatedVoiceAudio?.pause();
+  if (generatedVoiceUrl) URL.revokeObjectURL(generatedVoiceUrl);
 });
 </script>
 
@@ -1814,6 +1899,11 @@ onBeforeUnmount(() => {
           <div class="settings-status-grid">
             <article><span>◉</span><div><strong>{{ settingsLabels[interfaceLanguage].background }}</strong><small>{{ settingsLabels[interfaceLanguage].active }}</small></div><i></i></article>
             <article><span>⌁</span><div><strong>{{ settingsLabels[interfaceLanguage].wake }}</strong><small>C-3PO · C3PO · Си-три-пи-о</small></div><i></i></article>
+            <article class="voice-runtime-status">
+              <span>♫</span>
+              <div><strong>Локальная озвучка</strong><small>{{ ttsStatus?.message || "Проверяю голосовой компонент…" }}</small></div>
+              <i :class="{ unavailable: ttsStatus?.state !== 'running' && ttsStatus?.state !== 'stopped' }"></i>
+            </article>
           </div>
 
           <div class="settings-links">

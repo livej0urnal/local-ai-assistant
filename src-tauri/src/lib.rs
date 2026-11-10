@@ -1,4 +1,5 @@
 mod llm;
+mod tts;
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -340,6 +341,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(llm::LlmRuntime::default())
+        .manage(tts::TtsRuntime::default())
         .setup(|app| {
             let status = MenuItemBuilder::with_id("status", "● C-3PO работает в фоне")
                 .enabled(false)
@@ -406,6 +408,9 @@ pub fn run() {
             llm::start_llm,
             llm::stop_llm,
             llm::generate_local_reply,
+            tts::get_tts_status,
+            tts::start_tts,
+            tts::stop_tts,
             log_client_event,
             get_recent_logs,
             get_log_path

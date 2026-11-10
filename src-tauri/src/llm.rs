@@ -330,7 +330,10 @@ fn runtime_status(runtime: &LlmRuntime) -> Result<LlmRuntimeStatus, String> {
         process_id = None;
     }
 
-    let ready = process_id.is_some() && server_is_ready();
+    // Второй запуск приложения может встретить уже работающий сервер первого
+    // фонового экземпляра. Доступность localhost важнее владения Child:
+    // используем готовый R2-D2 вместо попытки занять тот же порт повторно.
+    let ready = server_is_ready();
     let resident_memory_bytes = process_id
         .and_then(|pid| {
             System::new_all()
@@ -405,6 +408,9 @@ pub(crate) fn get_llm_runtime_status(
 
 #[tauri::command]
 pub(crate) fn start_llm(runtime: State<'_, LlmRuntime>) -> Result<LlmRuntimeStatus, String> {
+    if server_is_ready() {
+        return runtime_status(&runtime);
+    }
     {
         let mut child_guard = runtime
             .child

@@ -2083,13 +2083,41 @@ function parseOpenApplicationCommand(text: string) {
   if (!requested) return null;
   // Составную фразу разбираем на цель и следующее действие. Без этого весь
   // хвост ошибочно становился названием приложения.
-  const parts = requested.split(/\s+и\s+(?=(?:посчитай|вычисли|сколько\s+будет|calculate)\b)/iu, 2);
+  const parts = requested.split(/\s+и\s+(?=(?:посчитай|вычисли|сколько\s+будет|calculate|найди|поищи|search|напиши|введи|напечатай|type)\b)/iu, 2);
   return { application: parts[0].trim(), followUp: parts[1]?.trim() || "" };
 }
 
 async function executeOpenApplicationCommand(application: string, followUp: string) {
   await openKnownApplication(application);
-  if (followUp) answerCalculation(followUp);
+  if (!followUp) return;
+  if (answerCalculation(followUp)) return;
+
+  const searchQuery = followUp.match(/^(?:найди|поищи|search(?:\s+for)?)\s+(.+)$/iu)?.[1]?.trim();
+  if (searchQuery) {
+    try {
+      const result = await invoke<NativeActionResult>("search_in_browser", { browser: application, query: searchQuery });
+      addMessage("assistant", result.message);
+      lastCommand.value = result.message;
+      speak(result.message);
+    } catch (error) {
+      const response = `Не удалось выполнить поиск: ${errorDetails(error).message}`;
+      addMessage("assistant", response);
+      speak(response);
+    }
+    return;
+  }
+
+  const textAction = followUp.match(/^(?:напиши|введи|напечатай|type)\s+(.+)$/iu)?.[1]?.trim();
+  if (textAction) {
+    const submit = /(?:\s+и\s+(?:отправь|нажми\s+(?:enter|ввод)|подтверди))$/iu.test(textAction);
+    const text = textAction.replace(/\s+и\s+(?:отправь|нажми\s+(?:enter|ввод)|подтверди)$/iu, "").trim();
+    pendingAction.value = { kind: "application-text", application, text, submit };
+    if ("__TAURI_INTERNALS__" in window) await invoke("show_main_window");
+    const response = `Я подготовил ввод в «${application}»: «${text}». Проверьте текст и подтвердите действие.`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+  }
 }
 
 async function answerWeatherQuestion(question: string, notifyInBackground: boolean) {

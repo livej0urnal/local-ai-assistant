@@ -550,7 +550,12 @@ const audioLevel = ref(0);
 const environment = ref<EnvironmentReport | null>(null);
 const conversation = ref<HTMLElement | null>(null);
 watch([chatOpen, conversationListOpen, activeConversationId], ([isOpen, listIsOpen]) => {
-  if (isOpen && !listIsOpen) void scrollChat("auto");
+  if (isOpen) {
+    // Текстовый диалог работает тихо. Если панель открыли во время ответа,
+    // сразу прекращаем голос и оставляем пользователю точный текст.
+    if (voiceState.value === "speaking") interruptAssistantSpeech("chat-opened");
+    if (!listIsOpen) void scrollChat("auto");
+  }
 }, { flush: "post" });
 watch(isConsultingR2, (isActive) => {
   // Временная реплика R2-D2 является частью диалога, поэтому при её появлении
@@ -771,7 +776,7 @@ async function playPrivateVoice(
   replaceCaption = true,
   waitForCompletion = false,
 ) {
-  if (silentMode.value || commandLanguage.value !== "ru" || !privateVoiceCatalog.value) {
+  if (silentMode.value || chatOpen.value || commandLanguage.value !== "ru" || !privateVoiceCatalog.value) {
     await writeLog("info", "voice.private-pack", "Фраза пропущена", {
       category,
       silentMode: silentMode.value,
@@ -947,7 +952,7 @@ async function stopLocalModel() {
 type R2D2Mood = "thinking" | "success" | "error" | "shutdown";
 
 async function playR2D2Signal(mood: R2D2Mood) {
-  if (silentMode.value) return;
+  if (silentMode.value || chatOpen.value) return;
   // Это оригинальные процедурно созданные сигналы, а не аудиофрагменты фильма.
   // Позже этот слой можно заменить лицензированным звуковым пакетом.
   droidAudioContext ??= new AudioContext();
@@ -1364,7 +1369,9 @@ function startAudioMeter(stream: MediaStream) {
   update();
 }
 
-function interruptAssistantSpeech(source: "speech-recognition" | "recognized-text" | "audio-meter" = "audio-meter") {
+function interruptAssistantSpeech(
+  source: "speech-recognition" | "recognized-text" | "audio-meter" | "chat-opened" = "audio-meter",
+) {
   if (voiceState.value !== "speaking") return;
   speechRunId += 1;
   window.speechSynthesis?.cancel();
@@ -1382,7 +1389,10 @@ function interruptAssistantSpeech(source: "speech-recognition" | "recognized-tex
   } else {
     voiceState.value = "idle";
   }
-  void writeLog("info", "voice.barge-in", "Озвучка остановлена новой речью пользователя", { source });
+  const message = source === "chat-opened"
+    ? "Озвучка остановлена: пользователь открыл текстовый диалог"
+    : "Озвучка остановлена новой речью пользователя";
+  void writeLog("info", "voice.barge-in", message, { source });
 }
 
 async function countMicrophones() {
@@ -1673,7 +1683,9 @@ async function playSystemSpeech(text: string, runId: number) {
 }
 
 async function speak(text: string) {
-  if (silentMode.value || !text.trim()) return;
+  // Открытая панель означает, что пользователь выбрал текстовый сценарий.
+  // Не дублируем видимый ответ голосом и не мешаем читать историю.
+  if (silentMode.value || chatOpen.value || !text.trim()) return;
   stopGeneratedSpeech?.();
   const runId = ++speechRunId;
   const resumeListening = shouldListen;

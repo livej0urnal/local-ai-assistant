@@ -1,6 +1,15 @@
-use serde::Serialize;
+use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use sysinfo::System;
-use tracing::info;
+use tauri::webview::{PermissionKind, PermissionResponse};
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Serialize)]
@@ -29,6 +38,110 @@ struct EnvironmentReport {
     platform: String,
     family: String,
     capabilities: Vec<NativeCapability>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientLogEntry {
+    level: String,
+    source: String,
+    message: String,
+    details: Option<String>,
+    timestamp: String,
+}
+
+static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn application_log_path() -> Result<PathBuf, String> {
+    let project_dirs = ProjectDirs::from("com", "igorfilippov", "C-3PO")
+        .ok_or_else(|| "Не удалось определить папку данных приложения".to_string())?;
+    let directory = project_dirs.data_local_dir().join("logs");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("c3po.log"))
+}
+
+fn clean_log_value(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .take(max_chars)
+        .map(|character| if character == '\n' || character == '\r' { ' ' } else { character })
+        .collect()
+}
+
+fn append_log_line(
+    timestamp: &str,
+    level: &str,
+    source: &str,
+    message: &str,
+    details: Option<&str>,
+) -> Result<(), String> {
+    let _guard = LOG_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Журнал ошибок временно недоступен".to_string())?;
+    let path = application_log_path()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+
+    let details = details.filter(|value| !value.is_empty()).unwrap_or("—");
+    writeln!(
+        file,
+        "{} | {:<5} | {} | {} | {}",
+        clean_log_value(timestamp, 64),
+        clean_log_value(level, 12).to_uppercase(),
+        clean_log_value(source, 80),
+        clean_log_value(message, 1000),
+        clean_log_value(details, 4000),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn append_native_log(level: &str, source: &str, message: &str) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown-time".to_string());
+    if let Err(error) = append_log_line(&timestamp, level, source, message, None) {
+        warn!(%error, "Could not write application log");
+    }
+}
+
+#[tauri::command]
+fn log_client_event(entry: ClientLogEntry) -> Result<(), String> {
+    append_log_line(
+        &entry.timestamp,
+        &entry.level,
+        &entry.source,
+        &entry.message,
+        entry.details.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn get_recent_logs(limit: Option<usize>) -> Result<Vec<String>, String> {
+    let path = application_log_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let limit = limit.unwrap_or(40).clamp(1, 200);
+    let mut lines: Vec<String> = contents
+        .lines()
+        .rev()
+        .take(limit)
+        .map(str::to_string)
+        .collect();
+    lines.reverse();
+    Ok(lines)
+}
+
+#[tauri::command]
+fn get_log_path() -> Result<String, String> {
+    Ok(application_log_path()?.display().to_string())
 }
 
 fn collect_system_info() -> Result<SystemInfo, String> {
@@ -102,11 +215,27 @@ pub fn run() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
     info!("Starting C-3PO");
+    append_native_log("info", "rust.application", "Starting C-3PO");
 
     tauri::Builder::default()
+        .on_permission_request(|_, kind| {
+            let response = match kind {
+                PermissionKind::Microphone => PermissionResponse::Allow,
+                _ => PermissionResponse::Default,
+            };
+            append_native_log(
+                "info",
+                "tauri.permission",
+                &format!("WebView requested {kind}; response: {response}"),
+            );
+            response
+        })
         .invoke_handler(tauri::generate_handler![
             get_system_info,
-            get_environment_report
+            get_environment_report,
+            log_client_event,
+            get_recent_logs,
+            get_log_path
         ])
         .run(tauri::generate_context!())
         .expect("failed to run C-3PO");

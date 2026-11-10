@@ -34,6 +34,13 @@ type EnvironmentReport = {
 type PermissionState = "checking" | "prompt" | "granted" | "denied" | "unsupported";
 type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "paused" | "error";
 
+type AppError = {
+  title: string;
+  message: string;
+  guidance: string;
+  timestamp: string;
+};
+
 type RecognitionResultItem = {
   isFinal: boolean;
   0: { transcript: string };
@@ -83,6 +90,10 @@ const synthesisAvailable = ref(false);
 const audioLevel = ref(0);
 const environment = ref<EnvironmentReport | null>(null);
 const conversation = ref<HTMLElement | null>(null);
+const lastError = ref<AppError | null>(null);
+const recentLogs = ref<string[]>([]);
+const logPath = ref("");
+const logsLoading = ref(false);
 
 let recognition: RecognitionLike | null = null;
 let microphoneStream: MediaStream | null = null;
@@ -121,6 +132,84 @@ const microphoneLabel = computed(() => {
   return labels[microphonePermission.value];
 });
 const canPauseMicrophone = computed(() => microphoneActive.value || voiceState.value === "speaking");
+
+function errorDetails(error: unknown) {
+  if (error instanceof DOMException || error instanceof Error) {
+    return {
+      name: error.name || "Error",
+      message: error.message || "Без дополнительного описания",
+      stack: error.stack || "",
+    };
+  }
+  return { name: "UnknownError", message: String(error), stack: "" };
+}
+
+async function writeLog(
+  level: "info" | "warn" | "error",
+  source: string,
+  message: string,
+  details?: Record<string, unknown>,
+) {
+  const entry = {
+    level,
+    source,
+    message,
+    details: details ? JSON.stringify(details) : null,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (!("__TAURI_INTERNALS__" in window)) {
+    console[level](source, message, details ?? "");
+    return;
+  }
+
+  try {
+    await invoke("log_client_event", { entry });
+  } catch (logError) {
+    console.error("Не удалось записать событие в журнал C-3PO", logError);
+  }
+}
+
+function microphoneErrorDescription(error: unknown): AppError {
+  const details = errorDetails(error);
+  const guidance: Record<string, string> = {
+    NotAllowedError:
+      "Откройте Системные настройки → Конфиденциальность и безопасность → Микрофон и разрешите доступ для C-3PO. Затем полностью перезапустите приложение.",
+    NotFoundError: "Подключите микрофон или выберите доступное устройство ввода в настройках звука.",
+    NotReadableError:
+      "Закройте приложение, которое могло занять микрофон, и попробуйте снова. Также проверьте выбранный источник звука.",
+    AbortError: "Запрос был прерван системой. Попробуйте включить микрофон ещё раз.",
+    SecurityError: "Система заблокировала доступ из текущего режима запуска. Попробуйте собранное приложение C-3PO.",
+    TypeError: "Окно приложения не поддерживает требуемый способ доступа к микрофону.",
+  };
+
+  return {
+    title: `Микрофон: ${details.name}`,
+    message: details.message,
+    guidance: guidance[details.name] ?? "Откройте журнал ниже: в нём сохранены технические подробности ошибки.",
+    timestamp: new Date().toLocaleString("ru-RU"),
+  };
+}
+
+async function refreshLogs() {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  logsLoading.value = true;
+  try {
+    [recentLogs.value, logPath.value] = await Promise.all([
+      invoke<string[]>("get_recent_logs", { limit: 40 }),
+      invoke<string>("get_log_path"),
+    ]);
+  } catch (error) {
+    console.error("Не удалось прочитать журнал C-3PO", error);
+  } finally {
+    logsLoading.value = false;
+  }
+}
+
+async function openPermissions() {
+  permissionsOpen.value = true;
+  await refreshLogs();
+}
 
 async function scrollChat() {
   await nextTick();
@@ -187,6 +276,10 @@ function configureRecognition() {
     }
   };
   recognition.onerror = (event) => {
+    void writeLog("warn", "voice.recognition", `Ошибка распознавания: ${event.error}`, {
+      recognitionAvailable: recognitionAvailable.value,
+      microphonePermission: microphonePermission.value,
+    });
     if (event.error === "not-allowed" || event.error === "service-not-allowed") {
       microphonePermission.value = "denied";
       voiceState.value = "error";
@@ -261,10 +354,25 @@ async function requestMicrophone() {
   if (!navigator.mediaDevices?.getUserMedia) {
     microphonePermission.value = "unsupported";
     voiceState.value = "error";
+    lastError.value = {
+      title: "Микрофон недоступен",
+      message: "В текущем окне отсутствует getUserMedia.",
+      guidance: "Запустите полное приложение C-3PO, а не браузерный предпросмотр.",
+      timestamp: new Date().toLocaleString("ru-RU"),
+    };
+    await writeLog("error", "microphone.request", lastError.value.message, {
+      secureContext: window.isSecureContext,
+      userAgent: navigator.userAgent,
+    });
     return;
   }
 
   try {
+    lastError.value = null;
+    await writeLog("info", "microphone.request", "Пользователь запросил доступ к микрофону", {
+      secureContext: window.isSecureContext,
+      platform: environment.value?.platform ?? navigator.platform,
+    });
     microphoneStream?.getTracks().forEach((track) => track.stop());
     microphoneStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -277,14 +385,32 @@ async function requestMicrophone() {
     microphoneActive.value = true;
     onboardingOpen.value = false;
     await countMicrophones();
+    await writeLog("info", "microphone.request", "Доступ к микрофону получен", {
+      audioInputs: microphoneDevices.value,
+      tracks: microphoneStream.getAudioTracks().map((track) => ({
+        label: track.label || "без названия",
+        enabled: track.enabled,
+        readyState: track.readyState,
+      })),
+    });
     startAudioMeter(microphoneStream);
 
     if (recognitionAvailable.value) startRecognition();
     else voiceState.value = "idle";
   } catch (error) {
-    const name = error instanceof DOMException ? error.name : "UnknownError";
-    microphonePermission.value = name === "NotAllowedError" ? "denied" : "unsupported";
+    const details = errorDetails(error);
+    lastError.value = microphoneErrorDescription(error);
+    microphonePermission.value = details.name === "NotAllowedError" ? "denied" : "unsupported";
     voiceState.value = "error";
+    onboardingOpen.value = false;
+    await writeLog("error", "microphone.request", `${details.name}: ${details.message}`, {
+      stack: details.stack,
+      secureContext: window.isSecureContext,
+      platform: environment.value?.platform ?? navigator.platform,
+      userAgent: navigator.userAgent,
+      recognitionAvailable: recognitionAvailable.value,
+    });
+    await refreshLogs();
   }
 }
 
@@ -301,8 +427,10 @@ async function inspectMicrophonePermission() {
       microphonePermission.value = status.state;
       if (status.state === "granted") void requestMicrophone();
     };
-  } catch {
+  } catch (error) {
     microphonePermission.value = "prompt";
+    const details = errorDetails(error);
+    await writeLog("warn", "microphone.permission-check", `${details.name}: ${details.message}`);
   }
 
   if (microphonePermission.value === "granted") await requestMicrophone();
@@ -475,7 +603,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="header-actions">
-        <button class="ghost-button" type="button" @click="permissionsOpen = true">
+        <button class="ghost-button" type="button" @click="openPermissions">
           <span class="button-icon">⌾</span>
           Доступы
           <i :class="microphonePermission"></i>
@@ -518,6 +646,15 @@ onBeforeUnmount(() => {
           <p v-if="microphonePermission === 'granted' && !recognitionAvailable" class="voice-warning">
             Микрофон доступен, но системное распознавание речи не поддерживается этим WebView.
           </p>
+          <div v-if="lastError" class="error-card" role="alert">
+            <div>
+              <strong>{{ lastError.title }}</strong>
+              <small>{{ lastError.timestamp }}</small>
+            </div>
+            <p>{{ lastError.message }}</p>
+            <p>{{ lastError.guidance }}</p>
+            <button type="button" @click="openPermissions">Открыть журнал</button>
+          </div>
         </div>
       </section>
 
@@ -635,6 +772,21 @@ onBeforeUnmount(() => {
             <span class="permission-state neutral">не запрошено</span>
           </article>
         </div>
+
+        <section class="error-log" aria-label="Журнал ошибок">
+          <header>
+            <div>
+              <strong>Журнал событий и ошибок</strong>
+              <small>Содержит технические сведения, но не записывает звук или текст команд</small>
+            </div>
+            <button type="button" :disabled="logsLoading" @click="refreshLogs">
+              {{ logsLoading ? "Читаю…" : "Обновить" }}
+            </button>
+          </header>
+          <pre v-if="recentLogs.length">{{ recentLogs.join("\n") }}</pre>
+          <p v-else>Записей пока нет.</p>
+          <small v-if="logPath" class="log-path">Файл: {{ logPath }}</small>
+        </section>
 
         <p class="permission-note">
           C-3PO не запрашивает права заранее, если функция ими не пользуется. Это уменьшает доступ

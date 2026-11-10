@@ -150,6 +150,8 @@ async function writeLog(
   message: string,
   details?: Record<string, unknown>,
 ) {
+  // В журнал попадают только диагностические сведения. Звук и распознанный
+  // текст здесь намеренно не передаются и не сохраняются.
   const entry = {
     level,
     source,
@@ -171,6 +173,8 @@ async function writeLog(
 }
 
 function microphoneErrorDescription(error: unknown): AppError {
+  // Браузерные движки возвращают стандартные имена ошибок. Переводим их
+  // в конкретную подсказку, чтобы пользователю не пришлось искать код ошибки.
   const details = errorDetails(error);
   const guidance: Record<string, string> = {
     NotAllowedError:

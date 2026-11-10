@@ -52,6 +52,8 @@ struct ClientLogEntry {
 
 static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+// Храним журнал в системной папке данных приложения, а не рядом с программой:
+// установленное приложение может не иметь права записывать файлы в свою папку.
 fn application_log_path() -> Result<PathBuf, String> {
     let project_dirs = ProjectDirs::from("com", "igorfilippov", "C-3PO")
         .ok_or_else(|| "Не удалось определить папку данных приложения".to_string())?;
@@ -61,10 +63,18 @@ fn application_log_path() -> Result<PathBuf, String> {
 }
 
 fn clean_log_value(value: &str, max_chars: usize) -> String {
+    // Одна запись должна занимать одну строку. Так журнал остаётся читаемым,
+    // а случайный длинный текст ошибки не сможет бесконечно увеличивать файл.
     value
         .chars()
         .take(max_chars)
-        .map(|character| if character == '\n' || character == '\r' { ' ' } else { character })
+        .map(|character| {
+            if character == '\n' || character == '\r' {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
@@ -219,6 +229,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .on_permission_request(|_, kind| {
+            // Это разрешает запрос внутри WebView, но не обходит защиту ОС:
+            // macOS/Windows всё равно показывают пользователю своё системное окно.
+            // Все остальные виды доступа используют безопасное поведение по умолчанию.
             let response = match kind {
                 PermissionKind::Microphone => PermissionResponse::Allow,
                 _ => PermissionResponse::Default,

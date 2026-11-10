@@ -154,14 +154,24 @@ fn launch_named_application(requested: &str) -> Result<String, String> {
         .iter()
         .find(|(name, _)| normalize(name) == query);
     let selected = if let Some(application) = exact {
-        application
+        application.clone()
     } else {
+        // Некоторые системные приложения (например Safari в новых macOS)
+        // находятся в защищённом Cryptex и не видны обычному обходу каталогов.
+        // LaunchServices умеет разрешить их точное зарегистрированное имя.
+        let launch_services = Command::new("/usr/bin/open")
+            .args(["-a", requested.as_str()])
+            .output()
+            .map_err(|error| format!("Не удалось обратиться к LaunchServices: {error}"))?;
+        if launch_services.status.success() {
+            return Ok(requested);
+        }
         let partial = applications
             .iter()
             .filter(|(name, _)| normalize(name).contains(&query))
             .collect::<Vec<_>>();
         match partial.as_slice() {
-            [application] => application,
+            [application] => (*application).clone(),
             [] => {
                 return Err(format!(
                     "Приложение «{requested}» не найдено среди установленных."
@@ -185,7 +195,7 @@ fn launch_named_application(requested: &str) -> Result<String, String> {
         .output()
         .map_err(|error| format!("Не удалось запустить {}: {error}", selected.0))?;
     if output.status.success() {
-        Ok(selected.0.clone())
+        Ok(selected.0)
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }

@@ -340,6 +340,17 @@ pub fn run() {
     append_native_log("info", "rust.application", "Starting C-3PO");
 
     tauri::Builder::default()
+        // Этот плагин намеренно регистрируется первым: повторный запуск не
+        // создаёт ещё один WebView и фоновые процессы, а показывает уже
+        // существующее главное окно C-3PO.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            append_native_log(
+                "info",
+                "rust.single-instance",
+                "Повторный запуск перенаправлен в существующее окно",
+            );
+            reveal_main_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .manage(llm::LlmRuntime::default())
         .manage(tts::TtsRuntime::default())

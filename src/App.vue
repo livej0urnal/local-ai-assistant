@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import droidPortrait from "./assets/protocol-droid.png";
 
@@ -17,7 +17,32 @@ type SystemInfo = {
   totalMemoryMb: number;
 };
 
-type VoiceState = "idle" | "listening" | "speaking" | "error";
+type NativeCapability = {
+  id: string;
+  available: boolean;
+  permissionRequired: boolean;
+  state: string;
+};
+
+type EnvironmentReport = {
+  system: SystemInfo;
+  platform: string;
+  family: string;
+  capabilities: NativeCapability[];
+};
+
+type PermissionState = "checking" | "prompt" | "granted" | "denied" | "unsupported";
+type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "paused" | "error";
+
+type RecognitionResultItem = {
+  isFinal: boolean;
+  0: { transcript: string };
+};
+
+type RecognitionResultList = {
+  length: number;
+  [index: number]: RecognitionResultItem;
+};
 
 type RecognitionLike = {
   lang: string;
@@ -26,71 +51,280 @@ type RecognitionLike = {
   onstart: (() => void) | null;
   onend: (() => void) | null;
   onerror: ((event: { error: string }) => void) | null;
-  onresult: ((event: { results: { 0: { 0: { transcript: string } } } }) => void) | null;
+  onresult: ((event: { resultIndex: number; results: RecognitionResultList }) => void) | null;
   start: () => void;
+  stop: () => void;
 };
 
 type RecognitionConstructor = new () => RecognitionLike;
 
-const input = ref("");
-const pendingAction = ref(false);
-const isWorking = ref(false);
-const voiceEnabled = ref(true);
-const voiceState = ref<VoiceState>("idle");
 const messages = ref<Message[]>([
   {
     id: 1,
     role: "assistant",
-    text: "Здравствуйте! Я C-3PO, ваш локальный помощник. Пока я умею безопасно показывать информацию об этом компьютере.",
+    text: "Здравствуйте. Голосовой режим готов. Скажите: «Покажи информацию о системе».",
   },
 ]);
 const nextMessageId = ref(2);
+const input = ref("");
+const liveTranscript = ref("");
+const lastCommand = ref("Скажите команду…");
+const pendingAction = ref(false);
+const isWorking = ref(false);
+const chatOpen = ref(false);
+const permissionsOpen = ref(false);
+const onboardingOpen = ref(false);
+const voiceState = ref<VoiceState>("idle");
+const microphonePermission = ref<PermissionState>("checking");
+const microphoneDevices = ref(0);
+const recognitionAvailable = ref(false);
+const synthesisAvailable = ref(false);
+const audioLevel = ref(0);
+const environment = ref<EnvironmentReport | null>(null);
 const conversation = ref<HTMLElement | null>(null);
 
-const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
-const voiceStatus = computed(() => {
-  if (voiceState.value === "listening") return "Слушаю вас…";
-  if (voiceState.value === "speaking") return "Отвечаю голосом…";
-  if (voiceState.value === "error") return "Микрофон недоступен";
-  return "Готов к голосовой команде";
-});
+let recognition: RecognitionLike | null = null;
+let microphoneStream: MediaStream | null = null;
+let audioContext: AudioContext | null = null;
+let meterFrame = 0;
+let restartTimer = 0;
+let shouldListen = false;
 
-async function scrollToBottom() {
+const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
+const systemLabel = computed(() => {
+  if (!environment.value) return "Определяю систему…";
+  return `${environment.value.system.operatingSystem} ${environment.value.system.osVersion}`;
+});
+const voiceStatus = computed(() => {
+  const labels: Record<VoiceState, string> = {
+    idle: "Готов к голосовой команде",
+    listening: "Слушаю вас",
+    thinking: "Обрабатываю команду",
+    speaking: "Отвечаю голосом",
+    paused: "Микрофон на паузе",
+    error: "Голосовой режим недоступен",
+  };
+  return labels[voiceState.value];
+});
+const microphoneLabel = computed(() => {
+  const labels: Record<PermissionState, string> = {
+    checking: "Проверка…",
+    prompt: "Нужно разрешение",
+    granted: microphoneDevices.value > 0 ? `Разрешён · устройств: ${microphoneDevices.value}` : "Разрешён",
+    denied: "Запрещён системой",
+    unsupported: "Не поддерживается",
+  };
+  return labels[microphonePermission.value];
+});
+const isVoiceActive = computed(() => voiceState.value === "listening" || voiceState.value === "thinking");
+
+async function scrollChat() {
   await nextTick();
-  conversation.value?.scrollTo({
-    top: conversation.value.scrollHeight,
-    behavior: "smooth",
-  });
+  conversation.value?.scrollTo({ top: conversation.value.scrollHeight, behavior: "smooth" });
 }
 
 function addMessage(role: Message["role"], text: string) {
   messages.value.push({ id: nextMessageId.value++, role, text });
-  void scrollToBottom();
+  void scrollChat();
 }
 
-function submitMessage() {
-  const text = input.value.trim();
-  if (!text || isWorking.value) return;
+async function loadEnvironment() {
+  if ("__TAURI_INTERNALS__" in window) {
+    environment.value = await invoke<EnvironmentReport>("get_environment_report");
+    return;
+  }
 
-  addMessage("user", text);
-  input.value = "";
-  pendingAction.value = true;
-  void scrollToBottom();
+  environment.value = {
+    platform: navigator.platform.toLowerCase().includes("mac") ? "macos" : "browser",
+    family: "browser",
+    system: {
+      operatingSystem: "Режим браузера",
+      osVersion: "Предпросмотр",
+      hostName: "localhost",
+      architecture: navigator.platform || "unknown",
+      totalMemoryMb: 0,
+    },
+    capabilities: [
+      { id: "system-info", available: true, permissionRequired: false, state: "available" },
+      { id: "microphone", available: Boolean(navigator.mediaDevices), permissionRequired: true, state: "requires-runtime-check" },
+      { id: "files", available: true, permissionRequired: true, state: "on-demand" },
+      { id: "screen-capture", available: true, permissionRequired: true, state: "not-requested" },
+      { id: "accessibility", available: false, permissionRequired: true, state: "not-requested" },
+    ],
+  };
 }
 
-function useSuggestion() {
-  input.value = "Покажи информацию о системе";
-  submitMessage();
+function getRecognitionConstructor(): RecognitionConstructor | undefined {
+  const voiceWindow = window as typeof window & {
+    SpeechRecognition?: RecognitionConstructor;
+    webkitSpeechRecognition?: RecognitionConstructor;
+  };
+  return voiceWindow.SpeechRecognition ?? voiceWindow.webkitSpeechRecognition;
 }
 
-function cancelAction() {
-  pendingAction.value = false;
-  addMessage("assistant", "Действие отменено. Никаких изменений в системе не выполнено.");
+function configureRecognition() {
+  const Recognition = getRecognitionConstructor();
+  recognitionAvailable.value = Boolean(Recognition);
+  synthesisAvailable.value = "speechSynthesis" in window;
+
+  if (!Recognition) return;
+
+  recognition = new Recognition();
+  recognition.lang = "ru-RU";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.onstart = () => {
+    voiceState.value = "listening";
+  };
+  recognition.onend = () => {
+    if (shouldListen && voiceState.value !== "speaking") {
+      window.clearTimeout(restartTimer);
+      restartTimer = window.setTimeout(startRecognition, 350);
+    }
+  };
+  recognition.onerror = (event) => {
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      microphonePermission.value = "denied";
+      voiceState.value = "error";
+      shouldListen = false;
+      return;
+    }
+
+    if (event.error !== "no-speech" && event.error !== "aborted") {
+      voiceState.value = "error";
+    }
+  };
+  recognition.onresult = (event) => {
+    let finalText = "";
+    let interimText = "";
+
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      if (result.isFinal) finalText += result[0].transcript;
+      else interimText += result[0].transcript;
+    }
+
+    liveTranscript.value = interimText || finalText;
+    if (finalText.trim()) processVoiceCommand(finalText.trim());
+  };
+}
+
+function startRecognition() {
+  if (!recognition || microphonePermission.value !== "granted") return;
+
+  shouldListen = true;
+  try {
+    recognition.start();
+  } catch {
+    // Recognition is already active; the current session can continue.
+  }
+}
+
+function stopRecognition(nextState: VoiceState = "paused") {
+  shouldListen = false;
+  window.clearTimeout(restartTimer);
+  recognition?.stop();
+  voiceState.value = nextState;
+}
+
+function startAudioMeter(stream: MediaStream) {
+  audioContext?.close();
+  window.cancelAnimationFrame(meterFrame);
+
+  audioContext = new AudioContext();
+  const analyser = audioContext.createAnalyser();
+  const source = audioContext.createMediaStreamSource(stream);
+  const samples = new Uint8Array(analyser.frequencyBinCount);
+  analyser.fftSize = 256;
+  source.connect(analyser);
+
+  const update = () => {
+    analyser.getByteFrequencyData(samples);
+    const average = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+    audioLevel.value = Math.min(1, average / 55);
+    meterFrame = window.requestAnimationFrame(update);
+  };
+  update();
+}
+
+async function countMicrophones() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  microphoneDevices.value = devices.filter((device) => device.kind === "audioinput").length;
+}
+
+async function requestMicrophone() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    microphonePermission.value = "unsupported";
+    voiceState.value = "error";
+    return;
+  }
+
+  try {
+    microphoneStream?.getTracks().forEach((track) => track.stop());
+    microphoneStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    microphonePermission.value = "granted";
+    onboardingOpen.value = false;
+    await countMicrophones();
+    startAudioMeter(microphoneStream);
+
+    if (recognitionAvailable.value) startRecognition();
+    else voiceState.value = "idle";
+  } catch (error) {
+    const name = error instanceof DOMException ? error.name : "UnknownError";
+    microphonePermission.value = name === "NotAllowedError" ? "denied" : "unsupported";
+    voiceState.value = "error";
+  }
+}
+
+async function inspectMicrophonePermission() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    microphonePermission.value = "unsupported";
+    return;
+  }
+
+  try {
+    const status = await navigator.permissions.query({ name: "microphone" as PermissionName });
+    microphonePermission.value = status.state;
+    status.onchange = () => {
+      microphonePermission.value = status.state;
+      if (status.state === "granted") void requestMicrophone();
+    };
+  } catch {
+    microphonePermission.value = "prompt";
+  }
+
+  if (microphonePermission.value === "granted") await requestMicrophone();
+  else onboardingOpen.value = true;
+}
+
+function pauseMicrophone() {
+  stopRecognition("paused");
+  microphoneStream?.getTracks().forEach((track) => track.stop());
+  microphoneStream = null;
+  window.cancelAnimationFrame(meterFrame);
+  audioLevel.value = 0;
+}
+
+async function toggleMicrophone() {
+  if (isVoiceActive.value || voiceState.value === "speaking") {
+    pauseMicrophone();
+    return;
+  }
+  await requestMicrophone();
 }
 
 function speak(text: string) {
-  if (!voiceEnabled.value || !("speechSynthesis" in window)) return;
+  if (!synthesisAvailable.value) return;
 
+  voiceState.value = "speaking";
+  recognition?.stop();
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   const voices = window.speechSynthesis.getVoices();
@@ -99,223 +333,331 @@ function speak(text: string) {
   utterance.rate = 0.9;
   utterance.pitch = 1.08;
   utterance.volume = 0.92;
-  utterance.onstart = () => (voiceState.value = "speaking");
-  utterance.onend = () => (voiceState.value = "idle");
-  utterance.onerror = () => (voiceState.value = "error");
+  utterance.onend = () => {
+    voiceState.value = "idle";
+    if (microphonePermission.value === "granted") startRecognition();
+  };
+  utterance.onerror = () => {
+    voiceState.value = "error";
+  };
   window.speechSynthesis.speak(utterance);
 }
 
-function startListening() {
-  const voiceWindow = window as typeof window & {
-    SpeechRecognition?: RecognitionConstructor;
-    webkitSpeechRecognition?: RecognitionConstructor;
-  };
-  const Recognition = voiceWindow.SpeechRecognition ?? voiceWindow.webkitSpeechRecognition;
-
-  if (!Recognition) {
-    voiceState.value = "error";
-    addMessage(
-      "assistant",
-      "В этом режиме распознавание речи недоступно. В настольной версии мы подключим локальный Whisper.",
-    );
-    return;
-  }
-
-  const recognition = new Recognition();
-  recognition.lang = "ru-RU";
-  recognition.continuous = false;
-  recognition.interimResults = false;
-  recognition.onstart = () => (voiceState.value = "listening");
-  recognition.onend = () => {
-    if (voiceState.value === "listening") voiceState.value = "idle";
-  };
-  recognition.onerror = () => (voiceState.value = "error");
-  recognition.onresult = (event) => {
-    input.value = event.results[0][0].transcript;
-    voiceState.value = "idle";
-    submitMessage();
-  };
-  recognition.start();
+function proposeSystemInfo() {
+  pendingAction.value = true;
+  voiceState.value = "idle";
+  const response = "Я могу прочитать сведения о системе. Скажите «выполнить» или нажмите кнопку подтверждения.";
+  addMessage("assistant", response);
+  speak(response);
 }
 
-async function loadSystemInfo(): Promise<SystemInfo> {
-  if ("__TAURI_INTERNALS__" in window) {
-    return invoke<SystemInfo>("get_system_info");
-  }
-
-  return {
-    operatingSystem: "Режим браузера",
-    osVersion: "Демонстрация интерфейса",
-    hostName: "localhost",
-    architecture: "Apple Silicon",
-    totalMemoryMb: 16384,
-  };
+function cancelAction() {
+  pendingAction.value = false;
+  const response = "Действие отменено. Никаких изменений не выполнено.";
+  addMessage("assistant", response);
+  speak(response);
 }
 
 async function approveAction() {
   isWorking.value = true;
+  voiceState.value = "thinking";
 
   try {
-    const info = await loadSystemInfo();
+    const info = "__TAURI_INTERNALS__" in window
+      ? await invoke<SystemInfo>("get_system_info")
+      : environment.value?.system;
+
+    if (!info) throw new Error("Сведения о системе пока недоступны");
+
     pendingAction.value = false;
-    const response = `Готово. Система: ${info.operatingSystem} ${info.osVersion}. Компьютер: ${info.hostName}. Архитектура: ${info.architecture}. Оперативная память: ${Math.round(info.totalMemoryMb / 1024)} ГБ.`;
+    const memory = info.totalMemoryMb > 0 ? `${Math.round(info.totalMemoryMb / 1024)} ГБ памяти` : "объём памяти не определён";
+    const response = `${info.operatingSystem} ${info.osVersion}, архитектура ${info.architecture}, ${memory}.`;
     addMessage("assistant", response);
+    lastCommand.value = response;
     speak(response);
   } catch (error) {
-    pendingAction.value = false;
-    addMessage("assistant", `Не удалось получить информацию: ${String(error)}`);
+    const response = `Не удалось получить информацию: ${String(error)}`;
+    addMessage("assistant", response);
+    speak(response);
   } finally {
     isWorking.value = false;
   }
 }
+
+function processVoiceCommand(text: string) {
+  const normalized = text.toLowerCase();
+  lastCommand.value = text;
+  liveTranscript.value = "";
+  addMessage("user", text);
+
+  if (pendingAction.value && /(выполн|разреш|подтверж|да)/.test(normalized)) {
+    void approveAction();
+    return;
+  }
+  if (pendingAction.value && /(отмен|нет|стоп)/.test(normalized)) {
+    cancelAction();
+    return;
+  }
+  if (/(систем|компьютер|операцион|памят|процессор)/.test(normalized)) {
+    proposeSystemInfo();
+    return;
+  }
+  if (/(открой|покажи).*(чат|диалог)/.test(normalized)) {
+    chatOpen.value = true;
+    const response = "Открываю текстовый диалог.";
+    addMessage("assistant", response);
+    speak(response);
+    return;
+  }
+  if (/(закрой|скрой).*(чат|диалог)/.test(normalized)) {
+    chatOpen.value = false;
+    speak("Диалог закрыт. Продолжаю слушать голосовые команды.");
+    return;
+  }
+
+  const response = "Эту команду я пока не умею выполнять. Сейчас доступна информация о системе.";
+  addMessage("assistant", response);
+  speak(response);
+}
+
+function submitMessage() {
+  const text = input.value.trim();
+  if (!text || isWorking.value) return;
+  input.value = "";
+  processVoiceCommand(text);
+}
+
+function permissionStatus(id: string) {
+  if (id === "microphone") return microphonePermission.value;
+  const capability = environment.value?.capabilities.find((item) => item.id === id);
+  if (!capability?.available) return "unsupported";
+  if (!capability.permissionRequired) return "granted";
+  return "prompt";
+}
+
+onMounted(async () => {
+  configureRecognition();
+  await loadEnvironment();
+  await inspectMicrophonePermission();
+});
+
+onBeforeUnmount(() => {
+  pauseMicrophone();
+  window.speechSynthesis?.cancel();
+  audioContext?.close();
+});
 </script>
 
 <template>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">C</div>
+  <div class="voice-app" :class="`state-${voiceState}`">
+    <header class="app-header">
+      <div class="compact-brand">
+        <div class="brand-symbol">C</div>
         <div>
           <strong>C-3PO</strong>
-          <span>Local assistant</span>
+          <span>Локальный помощник</span>
         </div>
       </div>
 
-      <button class="new-chat" type="button">
-        <span aria-hidden="true">＋</span>
-        Новый диалог
-      </button>
-
-      <nav class="history" aria-label="История диалогов">
-        <p class="section-label">Сегодня</p>
-        <button class="history-item active" type="button">
-          <span class="chat-icon" aria-hidden="true">◇</span>
-          Знакомство с системой
-        </button>
-      </nav>
-
-      <div class="sidebar-footer">
-        <button class="settings-button" type="button">
-          <span aria-hidden="true">⚙</span>
-          Настройки
-        </button>
-        <div class="privacy-note">
-          <span class="shield" aria-hidden="true">✓</span>
-          <div>
-            <strong>Данные остаются здесь</strong>
-            <span>Локальная обработка</span>
-          </div>
-        </div>
-      </div>
-    </aside>
-
-    <main class="workspace">
-      <header class="topbar">
+      <div class="environment-chip">
+        <span class="status-light"></span>
         <div>
-          <h1>Новый диалог</h1>
-          <p>Безопасный помощник для вашего компьютера</p>
+          <strong>{{ systemLabel }}</strong>
+          <span>{{ environment?.system.architecture || "Проверка архитектуры" }}</span>
         </div>
-        <div class="local-status">
-          <span class="status-dot"></span>
-          Локально
+      </div>
+
+      <div class="header-actions">
+        <button class="ghost-button" type="button" @click="permissionsOpen = true">
+          <span class="button-icon">⌾</span>
+          Доступы
+          <i :class="microphonePermission"></i>
+        </button>
+        <button class="chat-button" type="button" @click="chatOpen = true">
+          <span>Открыть диалог</span>
+          <b>{{ Math.max(0, messages.length - 1) }}</b>
+        </button>
+      </div>
+    </header>
+
+    <main class="voice-workspace">
+      <section class="voice-hero">
+        <div class="ambient-grid"></div>
+        <div class="droid-console" :style="{ '--voice-level': audioLevel }">
+          <div class="scanner-ring ring-one"></div>
+          <div class="scanner-ring ring-two"></div>
+          <div class="voice-halo"></div>
+          <img :src="droidPortrait" alt="Золотой протокольный дроид C-3PO" />
+          <div class="voice-spectrum" aria-hidden="true">
+            <i v-for="index in 18" :key="index" :style="{ '--index': index }"></i>
+          </div>
         </div>
-      </header>
 
-      <section ref="conversation" class="conversation" aria-live="polite">
-        <div class="conversation-inner">
-          <div class="welcome">
-            <div class="droid-stage" :class="`voice-${voiceState}`">
-              <div class="orbit orbit-one"></div>
-              <div class="orbit orbit-two"></div>
-              <div class="droid-glow"></div>
-              <img :src="droidPortrait" alt="Золотой протокольный дроид C-3PO" />
-            </div>
-            <div class="welcome-copy">
-              <span class="eyebrow">ПРОТОКОЛЬНЫЙ ПОМОЩНИК</span>
-              <h2>Чем могу помочь?</h2>
-              <p>Я предложу действие и попрошу разрешение перед его выполнением.</p>
-              <div class="voice-presence" :class="voiceState">
-                <div class="voice-bars" aria-hidden="true">
-                  <i></i><i></i><i></i><i></i><i></i>
-                </div>
-                <span>{{ voiceStatus }}</span>
-              </div>
-            </div>
-          </div>
-
-          <div
-            v-for="message in messages"
-            :key="message.id"
-            class="message-row"
-            :class="message.role"
-          >
-            <div v-if="message.role === 'assistant'" class="message-avatar">C</div>
-            <div class="message-bubble">{{ message.text }}</div>
-          </div>
+        <div class="voice-copy">
+          <span class="eyebrow">ГОЛОСОВОЙ РЕЖИМ</span>
+          <h1>{{ voiceStatus }}</h1>
+          <p class="transcript">{{ liveTranscript || lastCommand }}</p>
 
           <button
-            v-if="messages.length === 1 && !pendingAction"
-            class="suggestion"
+            class="primary-microphone"
+            :class="{ active: isVoiceActive }"
             type="button"
-            @click="useSuggestion"
+            @click="toggleMicrophone"
           >
-            <span class="suggestion-icon" aria-hidden="true">⌁</span>
-            <span>
-              <strong>Показать информацию о системе</strong>
-              <small>Операционная система, процессор и память</small>
-            </span>
-            <span class="arrow" aria-hidden="true">→</span>
+            <span class="microphone-icon"></span>
+            <span>{{ isVoiceActive ? "Поставить на паузу" : "Включить микрофон" }}</span>
           </button>
 
-          <article v-if="pendingAction" class="action-card">
-            <div class="action-heading">
-              <div class="action-icon" aria-hidden="true">⌘</div>
-              <div>
-                <span class="eyebrow">ПРЕДЛАГАЕМОЕ ДЕЙСТВИЕ</span>
-                <h3>Получить информацию о системе</h3>
-              </div>
-              <span class="safe-badge">Безопасно</span>
-            </div>
-            <p>
-              C-3PO прочитает название системы, архитектуру и объём памяти. Файлы и настройки
-              не будут изменены.
-            </p>
-            <div class="action-buttons">
-              <button class="secondary-button" type="button" :disabled="isWorking" @click="cancelAction">
-                Отмена
-              </button>
-              <button class="primary-button" type="button" :disabled="isWorking" @click="approveAction">
-                {{ isWorking ? "Выполняю…" : "Разрешить" }}
-              </button>
-            </div>
-          </article>
+          <p v-if="microphonePermission === 'granted' && !recognitionAvailable" class="voice-warning">
+            Микрофон доступен, но системное распознавание речи не поддерживается этим WebView.
+          </p>
         </div>
       </section>
 
-      <footer class="composer-area">
-        <form class="composer" @submit.prevent="submitMessage">
+      <section class="quick-panel">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">БЫСТРЫЙ СТАРТ</span>
+            <h2>Что можно сказать</h2>
+          </div>
+          <span class="privacy-badge">Без передачи файлов</span>
+        </div>
+
+        <div class="command-grid">
+          <button type="button" @click="processVoiceCommand('Покажи информацию о системе')">
+            <span class="command-icon">⌘</span>
+            <span>
+              <strong>«Покажи информацию о системе»</strong>
+              <small>ОС, архитектура и оперативная память</small>
+            </span>
+            <b>→</b>
+          </button>
+          <button type="button" @click="chatOpen = true">
+            <span class="command-icon">◇</span>
+            <span>
+              <strong>«Открой диалог»</strong>
+              <small>Показать текстовую историю справа</small>
+            </span>
+            <b>→</b>
+          </button>
+        </div>
+      </section>
+
+      <section v-if="pendingAction" class="approval-bar">
+        <div class="approval-icon">⌘</div>
+        <div>
+          <span class="eyebrow">НУЖНО ПОДТВЕРЖДЕНИЕ</span>
+          <h3>Прочитать информацию о системе?</h3>
+          <p>Файлы и настройки не изменяются.</p>
+        </div>
+        <div class="approval-actions">
+          <button type="button" @click="cancelAction">Отмена</button>
+          <button class="approve-button" type="button" :disabled="isWorking" @click="approveAction">
+            {{ isWorking ? "Выполняю…" : "Разрешить" }}
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <div v-if="chatOpen" class="drawer-backdrop" @click.self="chatOpen = false">
+      <aside class="chat-drawer" aria-label="Текстовый диалог">
+        <header>
+          <div>
+            <span class="eyebrow">ИСТОРИЯ</span>
+            <h2>Диалог с C-3PO</h2>
+          </div>
+          <button type="button" aria-label="Закрыть диалог" @click="chatOpen = false">×</button>
+        </header>
+
+        <div ref="conversation" class="drawer-messages">
+          <div v-for="message in messages" :key="message.id" class="drawer-message" :class="message.role">
+            <span v-if="message.role === 'assistant'" class="small-avatar">C</span>
+            <p>{{ message.text }}</p>
+          </div>
+        </div>
+
+        <form class="drawer-composer" @submit.prevent="submitMessage">
           <textarea
             v-model="input"
-            rows="1"
-            placeholder="Напишите, что нужно сделать…"
-            aria-label="Сообщение для C-3PO"
+            rows="2"
+            placeholder="Введите команду…"
+            aria-label="Текстовая команда"
             @keydown.enter.exact.prevent="submitMessage"
           ></textarea>
-          <button
-            class="mic-button"
-            :class="{ active: voiceState === 'listening' }"
-            type="button"
-            :aria-label="voiceState === 'listening' ? 'C-3PO слушает' : 'Голосовая команда'"
-            @click="startListening"
-          >
-            <span class="mic-glyph" aria-hidden="true"></span>
-          </button>
-          <button class="send-button" type="submit" :disabled="!canSend" aria-label="Отправить">
-            ↑
-          </button>
+          <button type="submit" :disabled="!canSend">↑</button>
         </form>
-        <p>C-3PO всегда попросит подтверждение перед изменением данных</p>
-      </footer>
-    </main>
+      </aside>
+    </div>
+
+    <div v-if="permissionsOpen" class="modal-backdrop" @click.self="permissionsOpen = false">
+      <section class="permission-modal" aria-label="Доступы приложения">
+        <header>
+          <div>
+            <span class="eyebrow">СИСТЕМНЫЕ РАЗРЕШЕНИЯ</span>
+            <h2>Что доступно C-3PO</h2>
+          </div>
+          <button type="button" aria-label="Закрыть" @click="permissionsOpen = false">×</button>
+        </header>
+
+        <div class="system-summary">
+          <div><span>Операционная система</span><strong>{{ systemLabel }}</strong></div>
+          <div><span>Архитектура</span><strong>{{ environment?.system.architecture || "—" }}</strong></div>
+          <div><span>Компьютер</span><strong>{{ environment?.system.hostName || "—" }}</strong></div>
+        </div>
+
+        <div class="permission-list">
+          <article>
+            <span class="permission-icon">●</span>
+            <div><strong>Микрофон</strong><small>{{ microphoneLabel }}</small></div>
+            <span class="permission-state" :class="permissionStatus('microphone')">{{ permissionStatus('microphone') }}</span>
+            <button v-if="microphonePermission !== 'granted'" type="button" @click="requestMicrophone">Запросить</button>
+          </article>
+          <article>
+            <span class="permission-icon">⌘</span>
+            <div><strong>Информация о системе</strong><small>Только чтение основных сведений</small></div>
+            <span class="permission-state granted">доступно</span>
+          </article>
+          <article>
+            <span class="permission-icon">▱</span>
+            <div><strong>Файлы и папки</strong><small>Будет запрашиваться для выбранной папки</small></div>
+            <span class="permission-state prompt">по запросу</span>
+          </article>
+          <article>
+            <span class="permission-icon">▣</span>
+            <div><strong>Экран и управление</strong><small>Текущим функциям не требуется</small></div>
+            <span class="permission-state neutral">не запрошено</span>
+          </article>
+        </div>
+
+        <p class="permission-note">
+          C-3PO не запрашивает права заранее, если функция ими не пользуется. Это уменьшает доступ
+          приложения к системе.
+        </p>
+      </section>
+    </div>
+
+    <div v-if="onboardingOpen" class="modal-backdrop onboarding-backdrop">
+      <section class="permission-modal onboarding-card" aria-label="Первичная настройка микрофона">
+        <div class="onboarding-visual">
+          <img :src="droidPortrait" alt="C-3PO" />
+          <div class="onboarding-pulse"></div>
+        </div>
+        <span class="eyebrow">ПЕРВЫЙ ЗАПУСК</span>
+        <h2>Разрешить голосовые команды?</h2>
+        <p>
+          C-3PO использует микрофон только пока голосовой режим включён. macOS или Windows покажет
+          собственное системное окно подтверждения.
+        </p>
+        <ul>
+          <li>Вы всегда видите, когда микрофон активен</li>
+          <li>Микрофон можно поставить на паузу одним нажатием</li>
+          <li>Остальные разрешения запрашиваются только при необходимости</li>
+        </ul>
+        <div class="onboarding-actions">
+          <button type="button" @click="onboardingOpen = false; voiceState = 'paused'">Пока не сейчас</button>
+          <button class="approve-button" type="button" @click="requestMicrophone">Разрешить микрофон</button>
+        </div>
+      </section>
+    </div>
   </div>
 </template>

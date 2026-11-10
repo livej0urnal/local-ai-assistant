@@ -147,7 +147,15 @@ type AppError = {
 
 type PendingAction =
   | { kind: "system-info" }
-  | { kind: "telegram-message"; contact: string; message: string };
+  | { kind: "telegram-message"; contact: string; message: string }
+  | { kind: "application-text"; application: string; text: string; submit: boolean };
+
+type AutomationPermissions = {
+  platform: string;
+  accessibility: boolean;
+  screenRecording: boolean;
+  message: string;
+};
 
 type NativeActionResult = {
   success: boolean;
@@ -536,6 +544,7 @@ const isWorking = ref(false);
 const isConsultingR2 = ref(false);
 const chatOpen = ref(false);
 const permissionsOpen = ref(false);
+const automationPermissions = ref<AutomationPermissions | null>(null);
 const llmOpen = ref(false);
 const languageOpen = ref(false);
 const settingsOpen = ref(false);
@@ -711,13 +720,21 @@ const pendingActionTitle = computed(() => {
   if (pendingAction.value?.kind === "telegram-message") {
     return `Отправить сообщение контакту «${pendingAction.value.contact}»?`;
   }
+  if (pendingAction.value?.kind === "application-text") {
+    return `${pendingAction.value.submit ? "Ввести и подтвердить" : "Ввести текст"} в «${pendingAction.value.application}»?`;
+  }
   return "Прочитать информацию о системе?";
 });
 const pendingActionDescription = computed(() => {
   if (pendingAction.value?.kind === "telegram-message") return pendingAction.value.message;
+  if (pendingAction.value?.kind === "application-text") return pendingAction.value.text;
   return "Файлы и настройки не изменяются.";
 });
-const pendingActionButton = computed(() => pendingAction.value?.kind === "telegram-message" ? "Отправить" : "Разрешить");
+const pendingActionButton = computed(() => {
+  if (pendingAction.value?.kind === "telegram-message") return "Отправить";
+  if (pendingAction.value?.kind === "application-text") return pendingAction.value.submit ? "Ввести и выполнить" : "Ввести";
+  return "Разрешить";
+});
 
 function formatBytes(bytes: number) {
   const absolute = Math.abs(bytes);
@@ -1162,7 +1179,18 @@ async function refreshLogs() {
 async function openPermissions() {
   permissionsOpen.value = true;
   logsExpanded.value = false;
-  await refreshLogs();
+  await Promise.all([refreshLogs(), refreshAutomationPermissions()]);
+}
+
+async function refreshAutomationPermissions() {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  automationPermissions.value = await invoke<AutomationPermissions>("get_automation_permissions").catch(() => null);
+}
+
+async function openAutomationSettings(kind: "accessibility" | "screen-recording") {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  await invoke("open_automation_settings", { kind });
+  window.setTimeout(refreshAutomationPermissions, 1_000);
 }
 
 async function scrollChat(behavior: ScrollBehavior = "smooth") {
@@ -1864,6 +1892,24 @@ async function approveAction() {
   voiceState.value = "thinking";
 
   try {
+    if (action.kind === "application-text") {
+      if (!("__TAURI_INTERNALS__" in window)) throw new Error("Управление приложениями доступно только в настольной версии C-3PO");
+      const result = await invoke<NativeActionResult>("type_text_in_application", {
+        application: action.application,
+        text: action.text,
+        submit: action.submit,
+      });
+      pendingAction.value = null;
+      addMessage("assistant", result.message);
+      lastCommand.value = result.message;
+      await writeLog("info", "executor.application-text", "Подтверждённое действие выполнено", {
+        application: action.application,
+        characters: action.text.length,
+        submit: action.submit,
+      });
+      speak(result.message);
+      return;
+    }
     if (action.kind === "telegram-message") {
       if (!("__TAURI_INTERNALS__" in window)) throw new Error("Отправка доступна только в приложении C-3PO");
       const result = await invoke<NativeActionResult>("send_telegram_message", {
@@ -1901,6 +1947,8 @@ async function approveAction() {
     const details = errorDetails(error);
     const response = action.kind === "telegram-message"
       ? `Не удалось отправить сообщение. ${details.message}`
+      : action.kind === "application-text"
+        ? `Не удалось выполнить действие в приложении. ${details.message}`
       : `${moviePhrase("criticalError")} ${details.message}`;
     addMessage("assistant", response);
     lastCommand.value = response;
@@ -2131,6 +2179,16 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   }
   if (pendingAction.value?.kind === "system-info" && /(выполн|разреш|подтверж|да)/.test(normalized)) {
     void approveAction();
+    return;
+  }
+  if (pendingAction.value?.kind === "application-text" && /^(выполнить действие|подтверждаю действие|разрешаю ввод)$/iu.test(normalized.trim())) {
+    void approveAction();
+    return;
+  }
+  if (pendingAction.value?.kind === "application-text" && /(выполн|разреш|подтверж|да)/.test(normalized)) {
+    const response = "Для защиты от случайного ввода скажите точно: «выполнить действие», либо нажмите кнопку подтверждения.";
+    addMessage("assistant", response);
+    speak(response);
     return;
   }
   if (pendingAction.value && /(отмен|нет|стоп)/.test(normalized)) {

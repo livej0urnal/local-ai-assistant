@@ -14,6 +14,15 @@ pub(crate) struct ActionResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AutomationPermissions {
+    platform: String,
+    accessibility: bool,
+    screen_recording: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct WeatherReport {
     source: String,
     summary: String,
@@ -317,6 +326,184 @@ pub(crate) fn open_application(application: String) -> Result<ActionResult, Stri
         success: true,
         message: format!("Приложение «{opened_name}» открыто."),
     })
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
+#[tauri::command]
+pub(crate) fn get_automation_permissions() -> AutomationPermissions {
+    #[cfg(target_os = "macos")]
+    {
+        // Обе функции только читают состояние TCC и не показывают системных окон.
+        let accessibility = unsafe { AXIsProcessTrusted() };
+        let screen_recording = unsafe { CGPreflightScreenCaptureAccess() };
+        return AutomationPermissions {
+            platform: "macos".to_string(),
+            accessibility,
+            screen_recording,
+            message: if accessibility {
+                "Управление интерфейсом разрешено.".to_string()
+            } else {
+                "Для клавиатуры и кнопок разрешите C-3PO в разделе «Универсальный доступ».".to_string()
+            },
+        };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        AutomationPermissions {
+            platform: "windows".to_string(),
+            accessibility: true,
+            screen_recording: true,
+            message: "Доступность действий проверяется при выполнении через Windows UI Automation.".to_string(),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        AutomationPermissions {
+            platform: std::env::consts::OS.to_string(),
+            accessibility: false,
+            screen_recording: false,
+            message: "Автоматизация на этой платформе пока не поддерживается.".to_string(),
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn open_automation_settings(kind: String) -> Result<ActionResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match kind.as_str() {
+            "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "screen-recording" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            _ => return Err("Неизвестный раздел системных разрешений".to_string()),
+        };
+        Command::new("/usr/bin/open")
+            .arg(url)
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть системные настройки: {error}"))?;
+        return Ok(ActionResult { success: true, message: "Открыт системный раздел разрешений.".to_string() });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = kind;
+        Command::new("explorer.exe")
+            .arg("ms-settings:privacy")
+            .spawn()
+            .map_err(|error| format!("Не удалось открыть параметры Windows: {error}"))?;
+        Ok(ActionResult { success: true, message: "Открыты параметры конфиденциальности Windows.".to_string() })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = kind;
+        Err("Системные настройки разрешений на этой платформе не поддерживаются".to_string())
+    }
+}
+
+fn validate_automation_text(application: &str, text: &str) -> Result<(String, String), String> {
+    let application = application.trim();
+    let text = text.trim();
+    if application.is_empty() || application.chars().count() > 120 {
+        return Err("Некорректное название приложения".to_string());
+    }
+    if text.is_empty() || text.chars().count() > 4_000 || text.chars().any(char::is_control) {
+        return Err("Текст должен содержать от 1 до 4000 символов без управляющих символов".to_string());
+    }
+    Ok((application.to_string(), text.to_string()))
+}
+
+#[tauri::command]
+pub(crate) fn type_text_in_application(
+    application: String,
+    text: String,
+    submit: bool,
+) -> Result<ActionResult, String> {
+    let (application, text) = validate_automation_text(&application, &text)?;
+    #[cfg(target_os = "macos")]
+    {
+        if !unsafe { AXIsProcessTrusted() } {
+            return Err("macOS не разрешила управление интерфейсом. Откройте C-3PO в Системные настройки → Конфиденциальность и безопасность → Универсальный доступ.".to_string());
+        }
+        launch_named_application(&application)?;
+        const SCRIPT: &str = r#"
+on run argv
+  set messageText to item 1 of argv
+  set shouldSubmit to item 2 of argv
+  set previousClipboard to the clipboard
+  try
+    delay 0.6
+    tell application "System Events"
+      set the clipboard to messageText
+      keystroke "v" using command down
+      if shouldSubmit is "true" then key code 36
+    end tell
+    set the clipboard to previousClipboard
+  on error errorMessage number errorNumber
+    set the clipboard to previousClipboard
+    error errorMessage number errorNumber
+  end try
+end run
+"#;
+        let output = Command::new("/usr/bin/osascript")
+            .args(["-e", SCRIPT, &text, if submit { "true" } else { "false" }])
+            .output()
+            .map_err(|error| format!("Не удалось выполнить ввод: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        return Ok(ActionResult {
+            success: true,
+            message: if submit { format!("Текст введён и подтверждён в «{application}».") } else { format!("Текст введён в «{application}».") },
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (application, text, submit);
+        Err("Безопасный ввод через Windows UI Automation будет добавлен отдельным нативным модулем.".to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (application, text, submit);
+        Err("Управление интерфейсом на этой платформе пока не поддерживается".to_string())
+    }
+}
+
+fn percent_encode_query(value: &str) -> String {
+    value.bytes().map(|byte| match byte {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (byte as char).to_string(),
+        b' ' => "+".to_string(),
+        _ => format!("%{byte:02X}"),
+    }).collect()
+}
+
+#[tauri::command]
+pub(crate) fn search_in_browser(browser: String, query: String) -> Result<ActionResult, String> {
+    let browser = browser.trim();
+    let query = query.trim();
+    if browser.is_empty() || browser.chars().count() > 120 || query.is_empty() || query.chars().count() > 500 {
+        return Err("Укажите браузер и поисковый запрос".to_string());
+    }
+    let url = format!("https://www.google.com/search?q={}", percent_encode_query(query));
+    #[cfg(target_os = "macos")]
+    let result = Command::new("/usr/bin/open").args(["-a", canonical_application_name(browser).as_str(), url.as_str()]).output();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer.exe").arg(&url).output();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result: std::io::Result<std::process::Output> = Err(std::io::Error::other("unsupported platform"));
+    let output = result.map_err(|error| format!("Не удалось открыть поиск: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(ActionResult { success: true, message: format!("Поиск «{query}» открыт в браузере.") })
 }
 
 fn first_text(value: &serde_json::Value, path: &[&str]) -> Option<String> {

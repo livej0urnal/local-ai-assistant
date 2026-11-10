@@ -1470,15 +1470,29 @@ async function ensureTtsServer() {
   }
 }
 
-function splitSpeechText(text: string, maxCharacters = 110) {
+function splitSpeechText(text: string, maxCharacters = 220) {
   const chunks: string[] = [];
   const sentences = text.trim().match(/[^.!?。！？]+[.!?。！？]*/gu) ?? [text.trim()];
+  let paragraph = "";
+
+  const flushParagraph = () => {
+    if (paragraph) chunks.push(paragraph);
+    paragraph = "";
+  };
 
   for (const sentence of sentences.map((value) => value.trim()).filter(Boolean)) {
     if (sentence.length <= maxCharacters) {
-      chunks.push(sentence);
+      const combined = paragraph ? `${paragraph} ${sentence}` : sentence;
+      if (combined.length <= maxCharacters) {
+        paragraph = combined;
+      } else {
+        flushParagraph();
+        paragraph = sentence;
+      }
       continue;
     }
+
+    flushParagraph();
     let part = "";
     for (const word of sentence.split(/\s+/u)) {
       const candidate = part ? `${part} ${word}` : word;
@@ -1491,6 +1505,7 @@ function splitSpeechText(text: string, maxCharacters = 110) {
     }
     if (part) chunks.push(part);
   }
+  flushParagraph();
   return chunks;
 }
 

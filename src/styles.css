@@ -278,8 +278,99 @@ button:disabled {
 .welcome {
   display: flex;
   align-items: center;
-  gap: 18px;
-  margin-bottom: 38px;
+  gap: 30px;
+  min-height: 210px;
+  margin-bottom: 34px;
+  padding: 18px 28px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background:
+    linear-gradient(rgba(183, 136, 54, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(183, 136, 54, 0.04) 1px, transparent 1px),
+    radial-gradient(circle at 18% 56%, rgba(205, 157, 63, 0.17), transparent 29%),
+    rgba(255, 255, 255, 0.58);
+  background-size: 24px 24px, 24px 24px, auto, auto;
+}
+
+.droid-stage {
+  position: relative;
+  align-self: stretch;
+  flex: 0 0 190px;
+  min-height: 190px;
+}
+
+.droid-stage img {
+  position: absolute;
+  z-index: 3;
+  bottom: -9px;
+  left: 50%;
+  width: 205px;
+  max-height: 220px;
+  object-fit: contain;
+  transform: translateX(-50%);
+  filter: drop-shadow(0 14px 16px rgba(65, 43, 4, 0.24));
+  animation: droid-float 4.6s ease-in-out infinite;
+}
+
+.droid-glow {
+  position: absolute;
+  top: 48%;
+  left: 50%;
+  width: 128px;
+  height: 128px;
+  border-radius: 50%;
+  background: rgba(223, 173, 66, 0.25);
+  filter: blur(28px);
+  transform: translate(-50%, -50%);
+  animation: glow-breathe 2.8s ease-in-out infinite;
+}
+
+.orbit {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 50%;
+  border: 1px solid rgba(173, 124, 32, 0.28);
+  border-radius: 50%;
+}
+
+.orbit::after {
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d4a542;
+  box-shadow: 0 0 9px #d4a542;
+  content: "";
+}
+
+.orbit-one {
+  width: 152px;
+  height: 152px;
+  margin: -76px;
+  animation: orbit-spin 12s linear infinite;
+}
+
+.orbit-two {
+  width: 186px;
+  height: 186px;
+  margin: -93px;
+  border-style: dashed;
+  animation: orbit-spin 20s linear infinite reverse;
+}
+
+.voice-listening .droid-glow,
+.voice-speaking .droid-glow {
+  background: rgba(90, 216, 225, 0.3);
+  animation-duration: 0.75s;
+}
+
+.welcome-copy {
+  position: relative;
+  z-index: 4;
 }
 
 .assistant-avatar {
@@ -309,6 +400,49 @@ button:disabled {
   margin: 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+.voice-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 7px 10px;
+  border: 1px solid rgba(157, 129, 68, 0.2);
+  border-radius: 999px;
+  color: #756a52;
+  background: rgba(255, 251, 240, 0.72);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.voice-bars {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 14px;
+}
+
+.voice-bars i {
+  display: block;
+  width: 2px;
+  height: 5px;
+  border-radius: 2px;
+  background: #ad8131;
+}
+
+.voice-presence.listening .voice-bars i,
+.voice-presence.speaking .voice-bars i {
+  animation: voice-wave 0.7s ease-in-out infinite alternate;
+}
+
+.voice-bars i:nth-child(2),
+.voice-bars i:nth-child(4) {
+  animation-delay: -0.22s !important;
+}
+
+.voice-bars i:nth-child(3) {
+  animation-delay: -0.42s !important;
 }
 
 .message-row {
@@ -526,6 +660,71 @@ button:disabled {
   font-size: 18px;
 }
 
+.mic-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #d8d5cb;
+  border-radius: 10px;
+  color: #766a50;
+  background: #f8f5ed;
+}
+
+.mic-button.active {
+  border-color: #b68b36;
+  background: #f5e8c8;
+  box-shadow: 0 0 0 5px rgba(182, 139, 54, 0.12);
+  animation: mic-pulse 1.2s ease-out infinite;
+}
+
+.mic-glyph {
+  position: relative;
+  width: 9px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 7px;
+}
+
+.mic-glyph::before {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  left: -5px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  border-radius: 0 0 9px 9px;
+  content: "";
+}
+
+@keyframes droid-float {
+  0%, 100% { transform: translateX(-50%) translateY(0) rotate(-0.4deg); }
+  50% { transform: translateX(-50%) translateY(-7px) rotate(0.5deg); }
+}
+
+@keyframes glow-breathe {
+  0%, 100% { opacity: 0.55; transform: translate(-50%, -50%) scale(0.9); }
+  50% { opacity: 1; transform: translate(-50%, -50%) scale(1.12); }
+}
+
+@keyframes orbit-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes voice-wave {
+  from { height: 4px; }
+  to { height: 14px; }
+}
+
+@keyframes mic-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(182, 139, 54, 0.24); }
+  100% { box-shadow: 0 0 0 9px rgba(182, 139, 54, 0); }
+}
+
 .composer-area > p {
   margin: 8px auto 0;
   color: #99978f;
@@ -583,6 +782,19 @@ button:disabled {
   .conversation-inner {
     width: calc(100% - 32px);
     padding-top: 30px;
+  }
+
+  .welcome {
+    gap: 12px;
+    padding-inline: 12px;
+  }
+
+  .droid-stage {
+    flex-basis: 130px;
+  }
+
+  .droid-stage img {
+    width: 155px;
   }
 
   .action-card {

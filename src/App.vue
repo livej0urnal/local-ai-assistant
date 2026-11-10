@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import droidPortrait from "./assets/protocol-droid.png";
 
 type Message = {
   id: number;
@@ -16,9 +17,26 @@ type SystemInfo = {
   totalMemoryMb: number;
 };
 
+type VoiceState = "idle" | "listening" | "speaking" | "error";
+
+type RecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onresult: ((event: { results: { 0: { 0: { transcript: string } } } }) => void) | null;
+  start: () => void;
+};
+
+type RecognitionConstructor = new () => RecognitionLike;
+
 const input = ref("");
 const pendingAction = ref(false);
 const isWorking = ref(false);
+const voiceEnabled = ref(true);
+const voiceState = ref<VoiceState>("idle");
 const messages = ref<Message[]>([
   {
     id: 1,
@@ -30,6 +48,12 @@ const nextMessageId = ref(2);
 const conversation = ref<HTMLElement | null>(null);
 
 const canSend = computed(() => input.value.trim().length > 0 && !isWorking.value);
+const voiceStatus = computed(() => {
+  if (voiceState.value === "listening") return "Слушаю вас…";
+  if (voiceState.value === "speaking") return "Отвечаю голосом…";
+  if (voiceState.value === "error") return "Микрофон недоступен";
+  return "Готов к голосовой команде";
+});
 
 async function scrollToBottom() {
   await nextTick();
@@ -64,6 +88,56 @@ function cancelAction() {
   addMessage("assistant", "Действие отменено. Никаких изменений в системе не выполнено.");
 }
 
+function speak(text: string) {
+  if (!voiceEnabled.value || !("speechSynthesis" in window)) return;
+
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  const voices = window.speechSynthesis.getVoices();
+  utterance.voice = voices.find((voice) => voice.lang.toLowerCase().startsWith("ru")) ?? null;
+  utterance.lang = "ru-RU";
+  utterance.rate = 0.9;
+  utterance.pitch = 1.08;
+  utterance.volume = 0.92;
+  utterance.onstart = () => (voiceState.value = "speaking");
+  utterance.onend = () => (voiceState.value = "idle");
+  utterance.onerror = () => (voiceState.value = "error");
+  window.speechSynthesis.speak(utterance);
+}
+
+function startListening() {
+  const voiceWindow = window as typeof window & {
+    SpeechRecognition?: RecognitionConstructor;
+    webkitSpeechRecognition?: RecognitionConstructor;
+  };
+  const Recognition = voiceWindow.SpeechRecognition ?? voiceWindow.webkitSpeechRecognition;
+
+  if (!Recognition) {
+    voiceState.value = "error";
+    addMessage(
+      "assistant",
+      "В этом режиме распознавание речи недоступно. В настольной версии мы подключим локальный Whisper.",
+    );
+    return;
+  }
+
+  const recognition = new Recognition();
+  recognition.lang = "ru-RU";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.onstart = () => (voiceState.value = "listening");
+  recognition.onend = () => {
+    if (voiceState.value === "listening") voiceState.value = "idle";
+  };
+  recognition.onerror = () => (voiceState.value = "error");
+  recognition.onresult = (event) => {
+    input.value = event.results[0][0].transcript;
+    voiceState.value = "idle";
+    submitMessage();
+  };
+  recognition.start();
+}
+
 async function loadSystemInfo(): Promise<SystemInfo> {
   if ("__TAURI_INTERNALS__" in window) {
     return invoke<SystemInfo>("get_system_info");
@@ -84,10 +158,9 @@ async function approveAction() {
   try {
     const info = await loadSystemInfo();
     pendingAction.value = false;
-    addMessage(
-      "assistant",
-      `Готово. Система: ${info.operatingSystem} ${info.osVersion}. Компьютер: ${info.hostName}. Архитектура: ${info.architecture}. Оперативная память: ${Math.round(info.totalMemoryMb / 1024)} ГБ.`,
-    );
+    const response = `Готово. Система: ${info.operatingSystem} ${info.osVersion}. Компьютер: ${info.hostName}. Архитектура: ${info.architecture}. Оперативная память: ${Math.round(info.totalMemoryMb / 1024)} ГБ.`;
+    addMessage("assistant", response);
+    speak(response);
   } catch (error) {
     pendingAction.value = false;
     addMessage("assistant", `Не удалось получить информацию: ${String(error)}`);
@@ -151,11 +224,22 @@ async function approveAction() {
       <section ref="conversation" class="conversation" aria-live="polite">
         <div class="conversation-inner">
           <div class="welcome">
-            <div class="assistant-avatar">C</div>
-            <div>
+            <div class="droid-stage" :class="`voice-${voiceState}`">
+              <div class="orbit orbit-one"></div>
+              <div class="orbit orbit-two"></div>
+              <div class="droid-glow"></div>
+              <img :src="droidPortrait" alt="Золотой протокольный дроид C-3PO" />
+            </div>
+            <div class="welcome-copy">
               <span class="eyebrow">ПРОТОКОЛЬНЫЙ ПОМОЩНИК</span>
               <h2>Чем могу помочь?</h2>
               <p>Я предложу действие и попрошу разрешение перед его выполнением.</p>
+              <div class="voice-presence" :class="voiceState">
+                <div class="voice-bars" aria-hidden="true">
+                  <i></i><i></i><i></i><i></i><i></i>
+                </div>
+                <span>{{ voiceStatus }}</span>
+              </div>
             </div>
           </div>
 
@@ -217,6 +301,15 @@ async function approveAction() {
             aria-label="Сообщение для C-3PO"
             @keydown.enter.exact.prevent="submitMessage"
           ></textarea>
+          <button
+            class="mic-button"
+            :class="{ active: voiceState === 'listening' }"
+            type="button"
+            :aria-label="voiceState === 'listening' ? 'C-3PO слушает' : 'Голосовая команда'"
+            @click="startListening"
+          >
+            <span class="mic-glyph" aria-hidden="true"></span>
+          </button>
           <button class="send-button" type="submit" :disabled="!canSend" aria-label="Отправить">
             ↑
           </button>

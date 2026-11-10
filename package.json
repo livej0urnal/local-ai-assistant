@@ -8,11 +8,13 @@
     "dev:ensure": "node scripts/ensure-vite.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "desktop": "tauri dev",
+    "desktop": "node scripts/run-desktop.mjs",
+    "desktop:dev": "tauri dev",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-notification": "^2.8.1",
     "vue": "^3.5.45"
   },
   "devDependencies": {

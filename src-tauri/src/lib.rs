@@ -1,3 +1,7 @@
+mod executor;
+mod llm;
+mod tts;
+
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,8 +11,13 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use sysinfo::System;
-use tauri::webview::{PermissionKind, PermissionResponse};
+use sysinfo::{System, get_current_pid};
+use tauri::{
+    Manager,
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    webview::{PermissionKind, PermissionResponse},
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -20,6 +29,15 @@ struct SystemInfo {
     host_name: String,
     architecture: String,
     total_memory_mb: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessMetrics {
+    pid: u32,
+    resident_memory_bytes: u64,
+    virtual_memory_bytes: u64,
+    captured_at_unix_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +55,7 @@ struct EnvironmentReport {
     system: SystemInfo,
     platform: String,
     family: String,
+    is_app_bundle: bool,
     capabilities: Vec<NativeCapability>,
 }
 
@@ -51,7 +70,52 @@ struct ClientLogEntry {
 }
 
 static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionPreferences {
+    microphone_approved: bool,
+}
+
+fn permission_preferences_path() -> Result<PathBuf, String> {
+    let project_dirs = ProjectDirs::from("com", "igorfilippov", "C-3PO")
+        .ok_or_else(|| "Не удалось определить папку настроек приложения".to_string())?;
+    let directory = project_dirs.data_local_dir().join("settings");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("permissions.json"))
+}
+
+fn read_permission_preferences() -> PermissionPreferences {
+    let Ok(path) = permission_preferences_path() else {
+        return PermissionPreferences::default();
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return PermissionPreferences::default();
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_saved_microphone_approval() -> bool {
+    read_permission_preferences().microphone_approved
+}
+
+#[tauri::command]
+fn set_saved_microphone_approval(approved: bool) -> Result<(), String> {
+    let _guard = SETTINGS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Настройки приложения временно недоступны".to_string())?;
+    let preferences = PermissionPreferences {
+        microphone_approved: approved,
+    };
+    let contents = serde_json::to_string_pretty(&preferences).map_err(|error| error.to_string())?;
+    fs::write(permission_preferences_path()?, contents).map_err(|error| error.to_string())
+}
+
+// Храним журнал в системной папке данных приложения, а не рядом с программой:
+// установленное приложение может не иметь права записывать файлы в свою папку.
 fn application_log_path() -> Result<PathBuf, String> {
     let project_dirs = ProjectDirs::from("com", "igorfilippov", "C-3PO")
         .ok_or_else(|| "Не удалось определить папку данных приложения".to_string())?;
@@ -61,10 +125,18 @@ fn application_log_path() -> Result<PathBuf, String> {
 }
 
 fn clean_log_value(value: &str, max_chars: usize) -> String {
+    // Одна запись должна занимать одну строку. Так журнал остаётся читаемым,
+    // а случайный длинный текст ошибки не сможет бесконечно увеличивать файл.
     value
         .chars()
         .take(max_chars)
-        .map(|character| if character == '\n' || character == '\r' { ' ' } else { character })
+        .map(|character| {
+            if character == '\n' || character == '\r' {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
@@ -149,11 +221,40 @@ fn collect_system_info() -> Result<SystemInfo, String> {
     system.refresh_all();
 
     Ok(SystemInfo {
-        operating_system: System::name().unwrap_or_else(|_| "Unknown".to_string()),
+        // На macOS `System::name()` возвращает техническое имя ядра `Darwin`.
+        // Пользователю нужен привычный бренд операционной системы.
+        operating_system: match std::env::consts::OS {
+            "macos" => "macOS".to_string(),
+            "windows" => "Windows".to_string(),
+            "linux" => System::distribution_id(),
+            _ => System::name().unwrap_or_else(|_| std::env::consts::OS.to_string()),
+        },
         os_version: System::os_version().unwrap_or_else(|_| "Unknown".to_string()),
         host_name: System::host_name().unwrap_or_else(|_| "Unknown".to_string()),
         architecture: System::cpu_arch(),
         total_memory_mb: system.total_memory() / 1024 / 1024,
+    })
+}
+
+fn collect_process_metrics() -> Result<ProcessMetrics, String> {
+    let pid = get_current_pid().map_err(|error| error.to_string())?;
+    let system = System::new_all().map_err(|error| error.to_string())?;
+    let process = system
+        .process(pid)
+        .ok_or_else(|| "Не удалось найти процесс C-3PO".to_string())?;
+
+    Ok(ProcessMetrics {
+        pid: pid.as_u32(),
+        // RSS — физическая память, действительно находящаяся в ОЗУ сейчас.
+        // Это главный показатель для наблюдения за возможной утечкой памяти.
+        resident_memory_bytes: process.memory(),
+        // Виртуальная память сохраняется для диагностики, но на macOS может
+        // быть огромной из-за особенностей адресного пространства WebKit.
+        virtual_memory_bytes: process.virtual_memory(),
+        captured_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default(),
     })
 }
 
@@ -174,6 +275,9 @@ fn get_environment_report() -> Result<EnvironmentReport, String> {
         system: collect_system_info()?,
         platform: std::env::consts::OS.to_string(),
         family: std::env::consts::FAMILY.to_string(),
+        is_app_bundle: std::env::current_exe()
+            .map(|path| path.to_string_lossy().contains(".app/Contents/MacOS/"))
+            .unwrap_or(false),
         capabilities: vec![
             NativeCapability {
                 id: "system-info".to_string(),
@@ -209,6 +313,24 @@ fn get_environment_report() -> Result<EnvironmentReport, String> {
     })
 }
 
+#[tauri::command]
+fn get_process_metrics() -> Result<ProcessMetrics, String> {
+    collect_process_metrics()
+}
+
+fn reveal_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    reveal_main_window(&app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -218,9 +340,54 @@ pub fn run() {
     append_native_log("info", "rust.application", "Starting C-3PO");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .manage(llm::LlmRuntime::default())
+        .manage(tts::TtsRuntime::default())
+        .setup(|app| {
+            let status = MenuItemBuilder::with_id("status", "● C-3PO работает в фоне")
+                .enabled(false)
+                .build(app)?;
+            let open = MenuItemBuilder::with_id("open", "Открыть C-3PO").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Завершить C-3PO").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&status, &open, &quit])
+                .build()?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().expect("application icon").clone())
+                .tooltip("C-3PO — локальный помощник")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => reveal_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        reveal_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .on_permission_request(|_, kind| {
+            // Это разрешает запрос внутри WebView, но не обходит защиту ОС:
+            // macOS/Windows всё равно показывают пользователю своё системное окно.
+            // Все остальные виды доступа используют безопасное поведение по умолчанию.
             let response = match kind {
-                PermissionKind::Microphone => PermissionResponse::Allow,
+                PermissionKind::Microphone | PermissionKind::Autoplay => PermissionResponse::Allow,
                 _ => PermissionResponse::Default,
             };
             append_native_log(
@@ -233,6 +400,20 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_system_info,
             get_environment_report,
+            get_process_metrics,
+            show_main_window,
+            executor::open_application,
+            executor::send_telegram_message,
+            get_saved_microphone_approval,
+            set_saved_microphone_approval,
+            llm::get_llm_status,
+            llm::get_llm_runtime_status,
+            llm::start_llm,
+            llm::stop_llm,
+            llm::generate_local_reply,
+            tts::get_tts_status,
+            tts::start_tts,
+            tts::stop_tts,
             log_client_event,
             get_recent_logs,
             get_log_path
@@ -266,5 +447,13 @@ mod tests {
                 .iter()
                 .any(|item| item.id == "microphone")
         );
+    }
+
+    #[test]
+    fn current_process_memory_is_available() {
+        let metrics = collect_process_metrics().expect("process metrics should be available");
+
+        assert!(metrics.pid > 0);
+        assert!(metrics.resident_memory_bytes > 0);
     }
 }

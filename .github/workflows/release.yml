@@ -1,0 +1,49 @@
+name: Build desktop releases
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            args: "--target aarch64-apple-darwin"
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Test Rust core
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build and upload installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "C-3PO ${{ github.ref_name }}"
+          releaseBody: |
+            Unsigned preview build for macOS Apple Silicon and Windows.
+            Voice samples, GGUF models and personal data are not included.
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}

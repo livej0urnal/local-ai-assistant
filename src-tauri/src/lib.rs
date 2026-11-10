@@ -1,3 +1,4 @@
+mod executor;
 mod llm;
 mod tts;
 
@@ -401,6 +402,8 @@ pub fn run() {
             get_environment_report,
             get_process_metrics,
             show_main_window,
+            executor::open_application,
+            executor::send_telegram_message,
             get_saved_microphone_approval,
             set_saved_microphone_approval,
             llm::get_llm_status,

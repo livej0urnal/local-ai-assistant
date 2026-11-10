@@ -137,6 +137,15 @@ type AppError = {
   timestamp: string;
 };
 
+type PendingAction =
+  | { kind: "system-info" }
+  | { kind: "telegram-message"; contact: string; message: string };
+
+type NativeActionResult = {
+  success: boolean;
+  message: string;
+};
+
 type RecognitionResultItem = {
   isFinal: boolean;
   0: { transcript: string };
@@ -456,7 +465,8 @@ const nextMessageId = ref(Math.max(1, ...messages.value.map((message) => message
 const input = ref("");
 const liveTranscript = ref("");
 const lastCommand = ref(initialProfile ? t("sayCommand") : introductionPrompt(commandLanguage.value));
-const pendingAction = ref(false);
+const pendingAction = ref<PendingAction | null>(null);
+const awaitingTelegramMessageContact = ref("");
 const isWorking = ref(false);
 const isConsultingR2 = ref(false);
 const chatOpen = ref(false);
@@ -613,6 +623,17 @@ const selectedDroidName = computed(() => {
   if (modelPreference.value === "auto") return "Автовыбор";
   return droidModelFleet.value.find((profile) => profile.model?.name === modelPreference.value)?.droid ?? "Автовыбор";
 });
+const pendingActionTitle = computed(() => {
+  if (pendingAction.value?.kind === "telegram-message") {
+    return `Отправить сообщение контакту «${pendingAction.value.contact}»?`;
+  }
+  return "Прочитать информацию о системе?";
+});
+const pendingActionDescription = computed(() => {
+  if (pendingAction.value?.kind === "telegram-message") return pendingAction.value.message;
+  return "Файлы и настройки не изменяются.";
+});
+const pendingActionButton = computed(() => pendingAction.value?.kind === "telegram-message" ? "Отправить" : "Разрешить");
 
 function formatBytes(bytes: number) {
   const absolute = Math.abs(bytes);
@@ -1414,7 +1435,7 @@ async function testVoice() {
 }
 
 function proposeSystemInfo() {
-  pendingAction.value = true;
+  pendingAction.value = { kind: "system-info" };
   voiceState.value = "idle";
   const response = `${moviePhrase("riskyAction")} Скажите «выполнить» или нажмите кнопку подтверждения.`;
   addMessage("assistant", response);
@@ -1424,24 +1445,44 @@ function proposeSystemInfo() {
 }
 
 function cancelAction() {
-  pendingAction.value = false;
+  pendingAction.value = null;
+  awaitingTelegramMessageContact.value = "";
   const response = assistantPhrase("actionCancelled");
   addMessage("assistant", response);
   speak(response);
 }
 
 async function approveAction() {
+  const action = pendingAction.value;
+  if (!action) return;
   isWorking.value = true;
   voiceState.value = "thinking";
 
   try {
+    if (action.kind === "telegram-message") {
+      if (!("__TAURI_INTERNALS__" in window)) throw new Error("Отправка доступна только в приложении C-3PO");
+      const result = await invoke<NativeActionResult>("send_telegram_message", {
+        contact: action.contact,
+        message: action.message,
+      });
+      pendingAction.value = null;
+      addMessage("assistant", result.message);
+      lastCommand.value = result.message;
+      await writeLog("info", "executor.telegram", "Сообщение отправлено после явного подтверждения", {
+        contactLength: action.contact.length,
+        messageLength: action.message.length,
+      });
+      speak(result.message);
+      return;
+    }
+
     const info = "__TAURI_INTERNALS__" in window
       ? await invoke<SystemInfo>("get_system_info")
       : environment.value?.system;
 
     if (!info) throw new Error("Сведения о системе пока недоступны");
 
-    pendingAction.value = false;
+    pendingAction.value = null;
     const memory = info.totalMemoryMb > 0 ? `${Math.round(info.totalMemoryMb / 1024)} ГБ памяти` : "объём памяти не определён";
     await refreshProcessMetrics();
     const applicationMemory = processMetrics.value
@@ -1452,11 +1493,45 @@ async function approveAction() {
     lastCommand.value = response;
     speak(response);
   } catch (error) {
-    const response = `${moviePhrase("criticalError")} ${String(error)}`;
+    const details = errorDetails(error);
+    const response = action.kind === "telegram-message"
+      ? `Не удалось отправить сообщение. ${details.message}`
+      : `${moviePhrase("criticalError")} ${details.message}`;
     addMessage("assistant", response);
+    lastCommand.value = response;
+    await writeLog("error", `executor.${action.kind}`, `${details.name}: ${details.message}`);
     speak(response);
   } finally {
     isWorking.value = false;
+  }
+}
+
+function parseTelegramMessageCommand(text: string) {
+  const namesTelegram = /(telegram|телеграмм?)/iu.test(text);
+  const explicitlyNamesContact = /(напиши|отправь)(?:\s+сообщение)?\s+контакту/iu.test(text);
+  if (!/(напиши|отправь)/iu.test(text) || (!namesTelegram && !explicitlyNamesContact)) return null;
+  const full = text.match(/контакту\s+(.+?)\s+(?:сообщение|текст)\s+(.+)$/iu)
+    ?? text.match(/контакту\s+([^,:]+?)\s*[:,]\s*(.+)$/iu);
+  if (full) return { contact: full[1].trim(), message: full[2].trim() };
+
+  const contact = text.match(/контакту\s+(.+?)(?:\s+и\s+(?:я\s+)?(?:диктую|продиктую)\s+сообщение)?$/iu)?.[1]?.trim();
+  return contact ? { contact, message: "" } : null;
+}
+
+async function openKnownApplication(application: string) {
+  try {
+    if (!("__TAURI_INTERNALS__" in window)) throw new Error("Запуск программ доступен только в приложении C-3PO");
+    const result = await invoke<NativeActionResult>("open_application", { application });
+    addMessage("assistant", result.message);
+    lastCommand.value = result.message;
+    speak(result.message);
+  } catch (error) {
+    const details = errorDetails(error);
+    const response = `Не удалось открыть «${application}»: ${details.message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    await writeLog("error", "executor.open-application", `${details.name}: ${details.message}`);
+    speak(response);
   }
 }
 
@@ -1473,17 +1548,62 @@ function processVoiceCommand(text: string, notifyInBackground = false) {
     return;
   }
 
+  if (awaitingTelegramMessageContact.value) {
+    if (/^(отмена|отменить|стоп|cancel)$/iu.test(normalized.trim())) {
+      cancelAction();
+      return;
+    }
+    const contact = awaitingTelegramMessageContact.value;
+    awaitingTelegramMessageContact.value = "";
+    pendingAction.value = { kind: "telegram-message", contact, message: text.trim() };
+    chatOpen.value = true;
+    const response = `Я подготовил сообщение для контакта «${contact}»: «${text.trim()}». Для отправки скажите «отправить сообщение» или нажмите кнопку.`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    return;
+  }
+
   if (/(другой пользователь|новый пользователь|another user|new user|otro usuario|neuer benutzer|nouvel utilisateur|nuovo utente|novo usuário|新用户|別のユーザー|مستخدم جديد)/i.test(normalized)) {
     startNewSpeaker();
     return;
   }
 
-  if (pendingAction.value && /(выполн|разреш|подтверж|да)/.test(normalized)) {
+  if (pendingAction.value?.kind === "telegram-message" && /^(отправить сообщение|подтверждаю отправку)$/iu.test(normalized.trim())) {
+    void approveAction();
+    return;
+  }
+  if (pendingAction.value?.kind === "telegram-message" && /(выполн|разреш|подтверж|да)/.test(normalized)) {
+    const response = "Для защиты от случайной отправки скажите точно: «отправить сообщение», либо нажмите кнопку «Отправить».";
+    addMessage("assistant", response);
+    speak(response);
+    return;
+  }
+  if (pendingAction.value?.kind === "system-info" && /(выполн|разреш|подтверж|да)/.test(normalized)) {
     void approveAction();
     return;
   }
   if (pendingAction.value && /(отмен|нет|стоп)/.test(normalized)) {
     cancelAction();
+    return;
+  }
+  const telegramCommand = parseTelegramMessageCommand(text);
+  if (telegramCommand) {
+    if (!telegramCommand.message) {
+      awaitingTelegramMessageContact.value = telegramCommand.contact;
+      const response = `Telegram откроется после подтверждения отправки. Продиктуйте сообщение для контакта «${telegramCommand.contact}».`;
+      addMessage("assistant", response);
+      lastCommand.value = response;
+      speak(response);
+      return;
+    }
+    pendingAction.value = { kind: "telegram-message", ...telegramCommand };
+    chatOpen.value = true;
+    if (notifyInBackground && "__TAURI_INTERNALS__" in window) void invoke("show_main_window");
+    const response = `Проверьте сообщение для контакта «${telegramCommand.contact}»: «${telegramCommand.message}». Скажите «отправить сообщение» или нажмите кнопку.`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
     return;
   }
   if (normalized.includes(localizedSystemCommand) || /(систем|компьютер|операцион|памят|процессор)/.test(normalized)) {
@@ -1502,6 +1622,11 @@ function processVoiceCommand(text: string, notifyInBackground = false) {
   if (/(закрой|скрой).*(чат|диалог)/.test(normalized)) {
     chatOpen.value = false;
     speak(assistantPhrase("chatClosed"));
+    return;
+  }
+  const openApplication = text.match(/^(?:открой|запусти)\s+(?:приложение\s+)?(.+?)\s*$/iu)?.[1];
+  if (openApplication) {
+    void openKnownApplication(openApplication);
     return;
   }
 
@@ -1764,6 +1889,14 @@ onBeforeUnmount(() => {
             </span>
             <b>→</b>
           </button>
+          <button type="button" @click="processVoiceCommand('Открой Telegram')">
+            <span class="command-icon">✈</span>
+            <span>
+              <strong>«Открой Telegram»</strong>
+              <small>Сообщения отправляются только после подтверждения</small>
+            </span>
+            <b>→</b>
+          </button>
           <button type="button" @click="testVoice">
             <span class="command-icon">♫</span>
             <span>
@@ -1779,13 +1912,13 @@ onBeforeUnmount(() => {
         <div class="approval-icon">⌘</div>
         <div>
           <span class="eyebrow">НУЖНО ПОДТВЕРЖДЕНИЕ</span>
-          <h3>Прочитать информацию о системе?</h3>
-          <p>Файлы и настройки не изменяются.</p>
+          <h3>{{ pendingActionTitle }}</h3>
+          <p>{{ pendingActionDescription }}</p>
         </div>
         <div class="approval-actions">
           <button type="button" @click="cancelAction">Отмена</button>
           <button class="approve-button" type="button" :disabled="isWorking" @click="approveAction">
-            {{ isWorking ? "Выполняю…" : "Разрешить" }}
+            {{ isWorking ? "Выполняю…" : pendingActionButton }}
           </button>
         </div>
       </section>
@@ -2026,8 +2159,8 @@ onBeforeUnmount(() => {
           </article>
           <article>
             <span class="permission-icon">▣</span>
-            <div><strong>Экран и управление</strong><small>Текущим функциям не требуется</small></div>
-            <span class="permission-state neutral">не запрошено</span>
+            <div><strong>Управление приложениями</strong><small>Нужно для подтверждённой отправки через Telegram</small></div>
+            <span class="permission-state prompt">по запросу macOS</span>
           </article>
         </div>
 

@@ -45,6 +45,56 @@ pub(crate) struct CalendarOverview {
 pub(crate) struct ProductivityActionResult {
     success: bool,
     message: String,
+    undo_kind: Option<String>,
+    undo_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProductivityPermissionReport {
+    mail: bool,
+    calendar: bool,
+    message: String,
+}
+
+/// Просит macOS показать штатные окна Automation, не читая письма и события.
+#[cfg(target_os = "macos")]
+fn prime_productivity_permissions_native() -> ProductivityPermissionReport {
+    let mail = run_jxa("function run() { return Application('Mail').name(); }", &[]).is_ok();
+    let calendar = run_jxa(
+        "function run() { return Application('Calendar').name(); }",
+        &[],
+    )
+    .is_ok();
+    ProductivityPermissionReport {
+        mail,
+        calendar,
+        message: if mail && calendar {
+            "Доступ к Почте и Календарю готов.".to_string()
+        } else {
+            "Разрешите C-3PO управлять Почтой и Календарём в системном окне.".to_string()
+        },
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prime_productivity_permissions_native() -> ProductivityPermissionReport {
+    ProductivityPermissionReport {
+        mail: false,
+        calendar: false,
+        message: "На Windows почта и календарь подключаются через Microsoft 365.".to_string(),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn prime_productivity_permissions() -> ProductivityPermissionReport {
+    tauri::async_runtime::spawn_blocking(prime_productivity_permissions_native)
+        .await
+        .unwrap_or_else(|error| ProductivityPermissionReport {
+            mail: false,
+            calendar: false,
+            message: format!("Проверка разрешений остановилась: {error}"),
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -191,7 +241,7 @@ fn validate_draft(recipient: &str, subject: &str, body: &str) -> Result<(), Stri
 }
 
 #[cfg(target_os = "macos")]
-fn create_mail_draft_native(recipient: &str, subject: &str, body: &str) -> Result<(), String> {
+fn create_mail_draft_native(recipient: &str, subject: &str, body: &str) -> Result<String, String> {
     const SCRIPT: &str = r#"
 function run(argv) {
   const Mail = Application('Mail');
@@ -199,14 +249,18 @@ function run(argv) {
   Mail.outgoingMessages.push(draft);
   draft.toRecipients.push(Mail.Recipient({address: argv[0]}));
   Mail.activate();
-  return 'ok';
+  return String(draft.id());
 }
 "#;
-    run_jxa(SCRIPT, &[recipient, subject, body]).map(|_| ())
+    run_jxa(SCRIPT, &[recipient, subject, body])
 }
 
 #[cfg(not(target_os = "macos"))]
-fn create_mail_draft_native(_recipient: &str, _subject: &str, _body: &str) -> Result<(), String> {
+fn create_mail_draft_native(
+    _recipient: &str,
+    _subject: &str,
+    _body: &str,
+) -> Result<String, String> {
     Err("Создание почтового черновика на Windows будет доступно после подключения Microsoft 365 через OAuth.".to_string())
 }
 
@@ -220,7 +274,7 @@ pub(crate) fn create_mail_draft(
     let subject = subject.trim();
     let body = body.trim();
     validate_draft(recipient, subject, body)?;
-    create_mail_draft_native(recipient, subject, body).map_err(|error| {
+    let undo_token = create_mail_draft_native(recipient, subject, body).map_err(|error| {
         crate::executor::audit_action(
             "email-draft",
             "medium",
@@ -248,6 +302,8 @@ pub(crate) fn create_mail_draft(
         message: format!(
             "Черновик письма для «{recipient}» открыт в Apple Mail. Отправьте его после проверки."
         ),
+        undo_kind: Some("mail-draft".to_string()),
+        undo_token: Some(undo_token),
     })
 }
 
@@ -281,7 +337,7 @@ fn create_calendar_event_native(
     start_at: &str,
     end_at: &str,
     notes: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     const SCRIPT: &str = r#"
 function run(argv) {
   const Calendar = Application('Calendar');
@@ -300,10 +356,10 @@ function run(argv) {
   const event = Calendar.Event({summary: argv[0], startDate: start, endDate: end, description: argv[3] || ''});
   target.events.push(event);
   Calendar.activate();
-  return 'ok';
+  return String(event.uid());
 }
 "#;
-    run_jxa(SCRIPT, &[title, start_at, end_at, notes]).map(|_| ())
+    run_jxa(SCRIPT, &[title, start_at, end_at, notes])
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -312,7 +368,7 @@ fn create_calendar_event_native(
     _start_at: &str,
     _end_at: &str,
     _notes: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     Err(
         "Создание события на Windows будет доступно после подключения Microsoft 365 через OAuth."
             .to_string(),
@@ -331,7 +387,7 @@ pub(crate) fn create_calendar_event(
     let end_at = end_at.trim();
     let notes = notes.trim();
     validate_calendar_event(title, start_at, end_at, notes)?;
-    create_calendar_event_native(title, start_at, end_at, notes).map_err(|error| {
+    let undo_token = create_calendar_event_native(title, start_at, end_at, notes).map_err(|error| {
         crate::executor::audit_action(
             "calendar-event",
             "medium",
@@ -349,6 +405,70 @@ pub(crate) fn create_calendar_event(
     Ok(ProductivityActionResult {
         success: true,
         message: format!("Событие «{title}» добавлено в календарь."),
+        undo_kind: Some("calendar-event".to_string()),
+        undo_token: Some(undo_token),
+    })
+}
+
+fn validate_undo_token(token: &str) -> Result<(), String> {
+    if token.is_empty() || token.chars().count() > 512 || token.chars().any(char::is_control) {
+        return Err("Некорректная запись отмены".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn undo_productivity_action_native(kind: &str, token: &str) -> Result<(), String> {
+    const MAIL_SCRIPT: &str = r#"
+function run(argv) {
+  const Mail = Application('Mail');
+  for (const draft of Mail.outgoingMessages()) {
+    if (String(draft.id()) === argv[0]) { Mail.delete(draft); return 'ok'; }
+  }
+  throw new Error('Черновик уже закрыт, отправлен или удалён');
+}
+"#;
+    const CALENDAR_SCRIPT: &str = r#"
+function run(argv) {
+  const Calendar = Application('Calendar');
+  for (const calendar of Calendar.calendars()) {
+    for (const event of calendar.events()) {
+      try { if (String(event.uid()) === argv[0]) { Calendar.delete(event); return 'ok'; } } catch (_) {}
+    }
+  }
+  throw new Error('Событие уже изменено или удалено');
+}
+"#;
+    match kind {
+        "mail-draft" => run_jxa(MAIL_SCRIPT, &[token]).map(|_| ()),
+        "calendar-event" => run_jxa(CALENDAR_SCRIPT, &[token]).map(|_| ()),
+        _ => Err("Этот тип действия нельзя отменить".to_string()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn undo_productivity_action_native(_kind: &str, _token: &str) -> Result<(), String> {
+    Err("Отмена этого действия пока доступна только на macOS".to_string())
+}
+
+#[tauri::command]
+pub(crate) fn undo_productivity_action(
+    kind: String,
+    token: String,
+) -> Result<ProductivityActionResult, String> {
+    validate_undo_token(&token)?;
+    undo_productivity_action_native(&kind, &token)?;
+    crate::executor::audit_action(
+        "undo-productivity-action",
+        "low",
+        "completed",
+        serde_json::json!({ "kind": kind }),
+    );
+    Ok(ProductivityActionResult {
+        success: true,
+        message: "Последнее действие отменено.".to_string(),
+        undo_kind: None,
+        undo_token: None,
     })
 }
 

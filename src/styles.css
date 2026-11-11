@@ -838,6 +838,37 @@ button:disabled {
   background: #8b6720;
 }
 
+.undo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 20px 4px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(84, 153, 104, 0.42);
+  border-radius: 15px;
+  background: rgba(69, 137, 87, 0.09);
+}
+
+.undo-bar div {
+  display: grid;
+  gap: 3px;
+}
+
+.undo-bar small {
+  color: var(--muted);
+}
+
+.undo-bar button {
+  min-height: 38px;
+  padding: 0 15px;
+  border: 1px solid rgba(84, 153, 104, 0.55);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--surface-raised);
+  font-weight: 750;
+}
+
 .drawer-backdrop,
 .modal-backdrop {
   position: fixed;
@@ -2441,6 +2472,26 @@ button:disabled {
   font-size: 11px;
   line-height: 1.8;
   text-align: left;
+}
+
+.onboarding-card li::marker {
+  color: var(--muted);
+}
+
+.onboarding-card li.ready {
+  color: var(--success);
+}
+
+.onboarding-card li.ready::marker {
+  content: "✓  ";
+  color: var(--success);
+}
+
+.onboarding-card > .onboarding-status {
+  margin: -7px 0 18px;
+  min-height: 34px;
+  color: var(--text);
+  font-weight: 650;
 }
 
 .onboarding-actions {

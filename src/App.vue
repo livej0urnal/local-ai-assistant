@@ -170,10 +170,31 @@ type AutomationPermissions = {
   message: string;
 };
 
+type ProductivityPermissionReport = {
+  mail: boolean;
+  calendar: boolean;
+  message: string;
+};
+
 type NativeActionResult = {
   success: boolean;
   message: string;
+  undoKind?: string | null;
+  undoToken?: string | null;
 };
+
+type UndoableAction = { kind: string; token: string; label: string };
+
+function readUndoableAction(): UndoableAction | null {
+  try {
+    const value = JSON.parse(window.localStorage.getItem("c3po.last-undoable-action") || "null");
+    return value && typeof value.kind === "string" && typeof value.token === "string" && typeof value.label === "string"
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 type WeatherReport = {
   source: string;
@@ -609,6 +630,7 @@ const selectedFileNames = ref<string[]>([]);
 const liveTranscript = ref("");
 const lastCommand = ref(initialProfile ? t("sayCommand") : introductionPrompt(commandLanguage.value));
 const pendingAction = ref<PendingAction | null>(null);
+const lastUndoableAction = ref<UndoableAction | null>(readUndoableAction());
 const awaitingTelegramMessageContact = ref("");
 const isWorking = ref(false);
 const isConsultingR2 = ref(false);
@@ -619,6 +641,10 @@ const llmOpen = ref(false);
 const languageOpen = ref(false);
 const settingsOpen = ref(false);
 const onboardingOpen = ref(false);
+const onboardingBusy = ref(false);
+const onboardingStatus = ref("Готов начать проверку системы.");
+const productivityPermissions = ref<ProductivityPermissionReport | null>(null);
+const onboardingCompletedKey = "c3po.onboarding.completed.v2";
 const voiceState = ref<VoiceState>("idle");
 const microphonePermission = ref<PermissionState>("checking");
 const microphoneDevices = ref(0);
@@ -1352,6 +1378,67 @@ async function openAutomationSettings(kind: "accessibility" | "screen-recording"
   window.setTimeout(refreshAutomationPermissions, 1_000);
 }
 
+async function requestNotificationAccess() {
+  if (!("__TAURI_INTERNALS__" in window)) return false;
+  try {
+    const granted = await isNotificationPermissionGranted()
+      || await requestNotificationPermission() === "granted";
+    notificationPermission.value = granted ? "granted" : "denied";
+    return granted;
+  } catch (error) {
+    await writeLog("warn", "notification.onboarding", `Не удалось проверить уведомления: ${String(error)}`);
+    return false;
+  }
+}
+
+async function runFirstLaunchSetup() {
+  if (onboardingBusy.value) return;
+  onboardingBusy.value = true;
+  try {
+    onboardingStatus.value = "1 из 4 · Настраиваю микрофон…";
+    if (microphonePermission.value !== "granted") await requestMicrophone();
+
+    onboardingStatus.value = "2 из 4 · Настраиваю фоновые уведомления…";
+    await requestNotificationAccess();
+
+    onboardingStatus.value = "3 из 4 · Проверяю Почту и Календарь…";
+    if ("__TAURI_INTERNALS__" in window) {
+      productivityPermissions.value = await invoke<ProductivityPermissionReport>("prime_productivity_permissions");
+    }
+
+    onboardingStatus.value = "4 из 4 · Проверяю управление приложениями…";
+    await refreshAutomationPermissions();
+    if (environment.value?.platform === "macos" && !automationPermissions.value?.accessibility) {
+      onboardingStatus.value = "Разрешите C-3PO в разделе «Универсальный доступ», затем вернитесь и нажмите «Проверить готовность».";
+      await openAutomationSettings("accessibility");
+      return;
+    }
+    finishFirstLaunchSetup();
+  } catch (error) {
+    onboardingStatus.value = `Настройка не завершена: ${errorDetails(error).message}`;
+    await writeLog("error", "onboarding.setup", onboardingStatus.value);
+  } finally {
+    onboardingBusy.value = false;
+  }
+}
+
+async function verifyFirstLaunchSetup() {
+  onboardingBusy.value = true;
+  await refreshAutomationPermissions();
+  onboardingBusy.value = false;
+  if (environment.value?.platform !== "macos" || automationPermissions.value?.accessibility) {
+    finishFirstLaunchSetup();
+  } else {
+    onboardingStatus.value = "Универсальный доступ пока не включён. Разрешите C-3PO и проверьте ещё раз.";
+  }
+}
+
+function finishFirstLaunchSetup() {
+  window.localStorage.setItem(onboardingCompletedKey, "true");
+  onboardingStatus.value = "C-3PO готов к работе.";
+  onboardingOpen.value = false;
+}
+
 async function scrollChat(behavior: ScrollBehavior = "smooth") {
   await nextTick();
   conversation.value?.scrollTo({ top: conversation.value.scrollHeight, behavior });
@@ -1663,7 +1750,7 @@ async function requestMicrophone() {
     });
     rememberMicrophonePermission("granted");
     microphoneActive.value = true;
-    onboardingOpen.value = false;
+    if (window.localStorage.getItem(onboardingCompletedKey) === "true") onboardingOpen.value = false;
     await countMicrophones();
     await writeLog("info", "microphone.request", "Доступ к микрофону получен", {
       audioInputs: microphoneDevices.value,
@@ -1683,7 +1770,7 @@ async function requestMicrophone() {
     if (details.name === "NotAllowedError") rememberMicrophonePermission("denied");
     else microphonePermission.value = "unsupported";
     voiceState.value = "error";
-    onboardingOpen.value = false;
+    if (window.localStorage.getItem(onboardingCompletedKey) === "true") onboardingOpen.value = false;
     await writeLog("error", "microphone.request", `${details.name}: ${details.message}`, {
       stack: details.stack,
       secureContext: window.isSecureContext,
@@ -1740,10 +1827,10 @@ async function inspectMicrophonePermission() {
     await requestMicrophone();
   } else if (reportedState === "denied") {
     rememberMicrophonePermission("denied");
-    onboardingOpen.value = false;
+    onboardingOpen.value = window.localStorage.getItem(onboardingCompletedKey) !== "true";
   } else {
     microphonePermission.value = savedMicrophonePermission() === "denied" ? "denied" : "prompt";
-    onboardingOpen.value = microphonePermission.value === "prompt";
+    onboardingOpen.value = window.localStorage.getItem(onboardingCompletedKey) !== "true";
   }
 }
 
@@ -2047,12 +2134,32 @@ async function testVoice() {
 
 function proposeSystemInfo() {
   pendingAction.value = { kind: "system-info" };
-  voiceState.value = "idle";
-  const response = `${moviePhrase("riskyAction")} Скажите «выполнить» или нажмите кнопку подтверждения.`;
-  addMessage("assistant", response);
-  void playPrivateVoice("warning").then((played) => {
-    if (!played) speak(response);
-  });
+  void approveAction();
+}
+
+function rememberUndoableAction(result: NativeActionResult, label: string) {
+  if (!result.undoKind || !result.undoToken) return;
+  lastUndoableAction.value = { kind: result.undoKind, token: result.undoToken, label };
+  window.localStorage.setItem("c3po.last-undoable-action", JSON.stringify(lastUndoableAction.value));
+}
+
+async function undoLastAction() {
+  const action = lastUndoableAction.value;
+  if (!action || !("__TAURI_INTERNALS__" in window)) return;
+  isWorking.value = true;
+  try {
+    const result = await invoke<NativeActionResult>("undo_productivity_action", action);
+    lastUndoableAction.value = null;
+    window.localStorage.removeItem("c3po.last-undoable-action");
+    addMessage("assistant", result.message);
+    lastCommand.value = result.message;
+  } catch (error) {
+    const response = `Не удалось отменить действие: ${errorDetails(error).message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+  } finally {
+    isWorking.value = false;
+  }
 }
 
 function riskForAction(action: PendingAction) {
@@ -2092,6 +2199,7 @@ async function approveAction() {
         endAt: action.endAt,
         notes: action.notes,
       });
+      rememberUndoableAction(result, `Событие «${action.title}»`);
       pendingAction.value = null;
       addMessage("assistant", result.message);
       lastCommand.value = result.message;
@@ -2109,6 +2217,7 @@ async function approveAction() {
         subject: action.subject,
         body: action.body,
       });
+      rememberUndoableAction(result, `Черновик «${action.subject}»`);
       pendingAction.value = null;
       addMessage("assistant", result.message);
       lastCommand.value = result.message;
@@ -2344,8 +2453,12 @@ async function executeOpenApplicationCommand(application: string, followUp: stri
     const submit = /(?:\s+и\s+(?:отправь|нажми\s+(?:enter|ввод)|подтверди))$/iu.test(textAction);
     const text = textAction.replace(/\s+и\s+(?:отправь|нажми\s+(?:enter|ввод)|подтверди)$/iu, "").trim();
     pendingAction.value = { kind: "application-text", application, text, submit };
+    if (!submit) {
+      void approveAction();
+      return;
+    }
     if ("__TAURI_INTERNALS__" in window) await invoke("show_main_window");
-    const response = `Я подготовил ввод в «${application}»: «${text}». Проверьте текст и подтвердите действие.`;
+    const response = `Я подготовил ввод и отправку в «${application}»: «${text}». Подтвердите необратимую отправку.`;
     addMessage("assistant", response);
     lastCommand.value = response;
     speak(response);
@@ -2419,11 +2532,7 @@ async function composeEmailWithLocalModel(recipient: string, subject: string, br
     return;
   }
   pendingAction.value = { kind: "email-draft", recipient, subject, body };
-  chatOpen.value = true;
-  if ("__TAURI_INTERNALS__" in window) await invoke("show_main_window");
-  const response = `K-2SO подготовил письмо для «${recipient}». Я показываю полный текст перед созданием черновика. Проверьте его и скажите «создать черновик».`;
-  addMessage("assistant", response);
-  lastCommand.value = response;
+  await approveAction();
 }
 
 function parseCalendarEventCommand(text: string) {
@@ -2542,6 +2651,11 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   liveTranscript.value = "";
   addMessage("user", text);
 
+  if (/^(?:отмени|отменить)\s+(?:последнее\s+)?действие$/iu.test(normalized.trim())) {
+    void undoLastAction();
+    return;
+  }
+
   if (awaitingIntroduction.value) {
     rememberIntroducedUser(text);
     return;
@@ -2619,12 +2733,7 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   const emailDraft = parseEmailDraftCommand(text);
   if (emailDraft) {
     pendingAction.value = { kind: "email-draft", ...emailDraft };
-    chatOpen.value = true;
-    if (notifyInBackground && "__TAURI_INTERNALS__" in window) void invoke("show_main_window");
-    const response = `Я подготовил черновик для «${emailDraft.recipient}». Тема: «${emailDraft.subject}». Проверьте текст и скажите «создать черновик». Письмо не будет отправлено автоматически.`;
-    addMessage("assistant", response);
-    lastCommand.value = response;
-    speak(response);
+    void approveAction();
     return;
   }
   const emailComposition = parseEmailCompositionCommand(text);
@@ -2635,14 +2744,7 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   const calendarEvent = parseCalendarEventCommand(text);
   if (calendarEvent) {
     pendingAction.value = { kind: "calendar-event", ...calendarEvent };
-    chatOpen.value = true;
-    if (notifyInBackground && "__TAURI_INTERNALS__" in window) void invoke("show_main_window");
-    const start = new Date(calendarEvent.startAt).toLocaleString(selectedCommandLanguage.value.speechCode);
-    const end = new Date(calendarEvent.endAt).toLocaleString(selectedCommandLanguage.value.speechCode);
-    const response = `Я подготовил событие «${calendarEvent.title}» на ${start} — ${end}. Проверьте данные и скажите «добавить событие».`;
-    addMessage("assistant", response);
-    lastCommand.value = response;
-    speak(response);
+    void approveAction();
     return;
   }
   const telegramCommand = parseTelegramMessageCommand(text);
@@ -2901,7 +3003,9 @@ onMounted(async () => {
   saveInterfaceLanguage();
   saveCommandLanguage();
   await loadEnvironment();
-  await ensureNotificationPermission();
+  if (window.localStorage.getItem(onboardingCompletedKey) === "true") {
+    await ensureNotificationPermission();
+  }
   await loadPrivateVoiceCatalog();
   await loadLlmStatus();
   if ("__TAURI_INTERNALS__" in window) {
@@ -3090,6 +3194,14 @@ onBeforeUnmount(() => {
             {{ isWorking ? "Выполняю…" : pendingActionButton }}
           </button>
         </div>
+      </section>
+      <section v-else-if="lastUndoableAction" class="undo-bar">
+        <div>
+          <span class="eyebrow">ЖУРНАЛ ИЗМЕНЕНИЙ</span>
+          <strong>{{ lastUndoableAction.label }}</strong>
+          <small>Действие выполнено автоматически и может быть отменено.</small>
+        </div>
+        <button type="button" :disabled="isWorking" @click="undoLastAction">↶ Отменить</button>
       </section>
     </main>
 
@@ -3628,25 +3740,36 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="onboardingOpen" class="modal-backdrop onboarding-backdrop">
-      <section class="permission-modal onboarding-card" aria-label="Первичная настройка микрофона">
+      <section class="permission-modal onboarding-card" aria-label="Первичная настройка C-3PO">
         <div class="onboarding-visual">
           <img :src="droidPortrait" alt="C-3PO" />
           <div class="onboarding-pulse"></div>
         </div>
         <span class="eyebrow">ПЕРВЫЙ ЗАПУСК</span>
-        <h2>Разрешить голосовые команды?</h2>
+        <h2>Подготовим C-3PO к работе</h2>
         <p>
-          C-3PO использует микрофон только пока голосовой режим включён. macOS или Windows покажет
-          собственное системное окно подтверждения.
+          Один мастер последовательно настроит необходимые разрешения. macOS или Windows покажет
+          собственные защищённые окна — подтвердить их может только владелец компьютера.
         </p>
         <ul>
-          <li>Вы всегда видите, когда микрофон активен</li>
-          <li>Микрофон можно поставить на паузу одним нажатием</li>
-          <li>Остальные разрешения запрашиваются только при необходимости</li>
+          <li :class="{ ready: microphonePermission === 'granted' }">Микрофон и голосовые команды</li>
+          <li :class="{ ready: notificationPermission === 'granted' }">Фоновые системные уведомления</li>
+          <li :class="{ ready: productivityPermissions?.mail && productivityPermissions?.calendar }">Почта и Календарь без чтения данных при настройке</li>
+          <li :class="{ ready: automationPermissions?.accessibility }">Управление установленными приложениями</li>
         </ul>
+        <p class="onboarding-status">{{ onboardingStatus }}</p>
         <div class="onboarding-actions">
-          <button type="button" @click="onboardingOpen = false; voiceState = 'paused'">Пока не сейчас</button>
-          <button class="approve-button" type="button" @click="requestMicrophone">Разрешить микрофон</button>
+          <button type="button" @click="onboardingOpen = false; voiceState = 'paused'">Настроить позже</button>
+          <button
+            v-if="environment?.platform === 'macos' && automationPermissions && !automationPermissions.accessibility"
+            class="approve-button"
+            type="button"
+            :disabled="onboardingBusy"
+            @click="verifyFirstLaunchSetup"
+          >Проверить готовность</button>
+          <button v-else class="approve-button" type="button" :disabled="onboardingBusy" @click="runFirstLaunchSetup">
+            {{ onboardingBusy ? "Настраиваю…" : "Настроить доступы" }}
+          </button>
         </div>
       </section>
     </div>

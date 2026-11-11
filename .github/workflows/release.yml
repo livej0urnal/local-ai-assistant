@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:
@@ -42,8 +46,16 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install frontend dependencies
         run: npm ci
+      - name: Test frontend routing and scheduler
+        run: npm run test:quick-start
+      - name: Check production frontend
+        run: npm run build
+      - name: Check Rust format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Lint Rust core
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
       - name: Test Rust core
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Build bundled llama.cpp runtime
         run: |
           cmake -S vendor/llama.cpp -B vendor/llama.cpp/build -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
@@ -51,28 +63,36 @@ jobs:
       - name: Stage llama-server sidecar
         run: node scripts/stage-llama-sidecar.mjs ${{ matrix.target }}
       - name: Build and upload installers
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "C-3PO ${{ github.ref_name }}"
+          releaseName: "C-3PO Local Assistant ${{ github.ref_name }}"
           releaseBody: |
-            C-3PO Local Assistant for macOS Apple Silicon, macOS Intel and Windows x64.
+            # C-3PO Local Assistant 1.0
 
-            Highlights:
-            - corrected full-bundle macOS signing for installers downloaded from the Internet;
-            - restored microphone access for the signed Hardened Runtime application;
-            - local R2-D2, BB-8, K-2SO and BD-1 model routing;
-            - voice and text conversations with background wake-up;
-            - system, file, code, mail, calendar and screen analysis;
-            - scheduled tasks with progress and system notifications;
-            - confirmation and rollback for supported changing actions.
+            Первый стабильный настольный выпуск для macOS Apple Silicon, macOS Intel и Windows x64.
 
-            The installer includes the llama.cpp runtime. On first launch, the model panel can download
-            the official recommended GGUF pack after explicit confirmation (~8.5 GB). Models can also be
-            installed individually. Personal voice samples, conversation history and personal data are
-            never included in release assets.
+            ## Главное
+
+            - голосовой и текстовый интерфейс, фоновое локальное пробуждение на macOS;
+            - локальные R2-D2, BB-8, K-2SO и BD-1 с автоматической маршрутизацией;
+            - приложения, файлы, проекты, код, экран, почта и календарь;
+            - отложенные задачи с прогрессом и системными уведомлениями;
+            - проверка Rust, подтверждение и откат поддерживаемых изменений;
+            - мониторинг памяти, журнал событий, светлая/тёмная тема и 10 языков.
+
+            ## Установка
+
+            Выберите DMG с `aarch64` для Apple Silicon, DMG с `x86_64` для Intel либо NSIS `.exe`
+            для Windows. Сверьте файл по `SHA256SUMS.txt`. macOS-сборка имеет полную ad-hoc подпись;
+            при первом запуске Gatekeeper может попросить разрешить C-3PO в настройках безопасности.
+
+            Установщик включает `llama-server`. Рекомендуемые GGUF-модели (~8,5 ГБ) загружаются
+            отдельно из панели только после подтверждения. История, полный голосовой образец, веса TTS,
+            установленные модели и пользовательские данные в релиз не входят. Короткие встроенные
+            реакции записаны автором проекта и не содержат голоса актёров или звука из фильмов.
           # Keep matrix artifacts private until every platform and signature check succeeds.
           releaseDraft: true
           prerelease: false

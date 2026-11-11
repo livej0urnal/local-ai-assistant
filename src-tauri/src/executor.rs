@@ -1310,7 +1310,21 @@ fn weather_report_from_payload(payload: &serde_json::Value) -> Result<WeatherRep
     })
 }
 
-fn read_current_weather() -> Result<WeatherReport, String> {
+fn weather_url(location: &str) -> Result<String, String> {
+    let location = location.trim();
+    if location.is_empty()
+        || location.chars().count() > 120
+        || location.chars().any(char::is_control)
+    {
+        return Err("Укажите город или разрешите доступ к текущей геолокации".to_string());
+    }
+    Ok(format!(
+        "https://wttr.in/{}?format=j1&lang=ru",
+        percent_encode_query(location)
+    ))
+}
+
+fn read_current_weather(location: String) -> Result<WeatherReport, String> {
     // Фоновый HTTPS-запрос не запускает системное приложение и не требует
     // доступа к экрану. Сервис видит обычный сетевой адрес, но не текст команды.
     let agent = ureq::Agent::config_builder()
@@ -1318,7 +1332,7 @@ fn read_current_weather() -> Result<WeatherReport, String> {
         .build()
         .new_agent();
     let mut response = agent
-        .get("https://wttr.in/?format=j1&lang=ru")
+        .get(weather_url(&location)?)
         .header("User-Agent", "C-3PO-local-assistant/0.1")
         .call()
         .map_err(|error| format!("Фоновый сервис погоды недоступен: {error}"))?;
@@ -1330,8 +1344,8 @@ fn read_current_weather() -> Result<WeatherReport, String> {
 }
 
 #[tauri::command]
-pub(crate) async fn get_current_weather() -> Result<WeatherReport, String> {
-    tauri::async_runtime::spawn_blocking(read_current_weather)
+pub(crate) async fn get_current_weather(location: String) -> Result<WeatherReport, String> {
+    tauri::async_runtime::spawn_blocking(move || read_current_weather(location))
         .await
         .map_err(|error| format!("Не удалось дождаться данных погоды: {error}"))?
 }
@@ -1467,6 +1481,16 @@ mod tests {
         assert!(report.summary.contains("Podgorica, Montenegro"));
         assert!(report.summary.contains("18 °C"));
         assert!(report.summary.contains("влажность 61%"));
+    }
+
+    #[test]
+    fn weather_requires_an_explicit_safe_location() {
+        assert_eq!(
+            weather_url("Podgorica, Montenegro").expect("weather URL"),
+            "https://wttr.in/Podgorica%2C+Montenegro?format=j1&lang=ru"
+        );
+        assert!(weather_url("").is_err());
+        assert!(weather_url("Podgorica\nignored").is_err());
     }
 
     #[test]

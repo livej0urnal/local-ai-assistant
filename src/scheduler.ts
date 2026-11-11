@@ -25,7 +25,7 @@ export function parseScheduledTaskCommand(text: string, currentDate = new Date()
 
   const now = new Date(currentDate);
   let runAt: Date | null = null;
-  const duration = normalized.match(/через\s+(\d{1,4})\s*(минут\w*|час\w*|д(?:ень|ня|ней)|дн\w*)/iu);
+  const duration = normalized.match(/через\s+(\d{1,4})\s*(минут[а-яё]*|час[а-яё]*|д(?:ень|ня|ней)|дн[а-яё]*)/iu);
   if (duration) {
     const amount = Number(duration[1]);
     const unit = duration[2].toLowerCase();

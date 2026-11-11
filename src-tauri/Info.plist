@@ -7,6 +7,6 @@
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>C-3PO преобразует голосовые команды в текст для выполнения разрешённых действий.</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>C-3PO управляет выбранным приложением только после вашего явного подтверждения действия.</string>
+  <string>C-3PO по вашей команде читает локальные сводки Mail и Calendar, а изменяющие действия выполняет только после отдельного подтверждения.</string>
 </dict>
 </plist>

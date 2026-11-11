@@ -17,7 +17,7 @@ fn action_log_path() -> Result<PathBuf, String> {
     Ok(directory.join("actions.jsonl"))
 }
 
-fn audit_action(action: &str, risk: &str, outcome: &str, metadata: serde_json::Value) {
+pub(crate) fn audit_action(action: &str, risk: &str, outcome: &str, metadata: serde_json::Value) {
     let Ok(_guard) = ACTION_LOG_LOCK.get_or_init(|| Mutex::new(())).lock() else {
         return;
     };
@@ -54,7 +54,13 @@ pub(crate) fn record_action_decision(
 }
 
 fn validate_action_decision(action: &str, risk: &str, outcome: &str) -> Result<(), String> {
-    const ACTIONS: [&str; 3] = ["system-info", "telegram-message", "application-text"];
+    const ACTIONS: [&str; 5] = [
+        "system-info",
+        "telegram-message",
+        "application-text",
+        "email-draft",
+        "calendar-event",
+    ];
     const RISKS: [&str; 3] = ["low", "medium", "high"];
     const OUTCOMES: [&str; 2] = ["approved", "cancelled"];
     if !ACTIONS.contains(&action) || !RISKS.contains(&risk) || !OUTCOMES.contains(&outcome) {

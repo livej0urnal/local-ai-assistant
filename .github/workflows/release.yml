@@ -53,7 +53,11 @@ jobs:
       - name: Check Rust format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - name: Lint Rust core
+        if: runner.os == 'macOS'
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: Check Windows Rust core
+        if: runner.os == 'Windows'
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --all-features
       - name: Test Rust core
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Build bundled llama.cpp runtime

@@ -118,6 +118,16 @@ type PrivateVoiceCatalog = {
   phrases: PrivateVoicePhrase[];
 };
 
+type StartupVoiceVariant = Pick<PrivateVoicePhrase, "id" | "text" | "file"> & {
+  clipEndSeconds?: number;
+};
+
+const startupVoiceVariants: StartupVoiceVariant[] = [
+  { id: "phrase-025", text: "О, привет. Я C-3PO.", file: "phrase-025.mp3", clipEndSeconds: 2.35 },
+  { id: "phrase-026", text: "О, привет. По-моему, нас не представили друг другу.", file: "phrase-026.mp3" },
+  { id: "phrase-028", text: "О, здравствуйте. Чем могу быть полезен?", file: "phrase-028.mp3", clipEndSeconds: 3.8 },
+];
+
 type NativeCapability = {
   id: string;
   available: boolean;
@@ -871,8 +881,26 @@ async function playPrivateVoice(
     (phrase) => phrase.category === category && phrase.recommended,
   );
   if (!candidates.length) return false;
-  const phrase = candidates[privateVoiceIndex % candidates.length];
-  privateVoiceIndex += 1;
+  let clipEndSeconds: number | undefined;
+  let phrase: Pick<PrivateVoicePhrase, "id" | "text" | "file">;
+  if (category === "startup") {
+    const catalogFiles = new Set(privateVoiceCatalog.value.phrases.map((item) => item.file));
+    const available = startupVoiceVariants.filter((variant) => catalogFiles.has(variant.file));
+    const lastStartupId = window.localStorage.getItem("c3po.last-startup-phrase");
+    const selectable = available.length > 1
+      ? available.filter((variant) => variant.id !== lastStartupId)
+      : available;
+    if (!selectable.length) return false;
+    const randomValue = new Uint32Array(1);
+    window.crypto.getRandomValues(randomValue);
+    const selected = selectable[randomValue[0] % selectable.length];
+    phrase = selected;
+    clipEndSeconds = selected.clipEndSeconds;
+    window.localStorage.setItem("c3po.last-startup-phrase", selected.id);
+  } else {
+    phrase = candidates[privateVoiceIndex % candidates.length];
+    privateVoiceIndex += 1;
+  }
   privateVoiceAudio?.pause();
   stopGeneratedSpeech?.();
   privateVoiceAudio = new Audio(`./private-audio/${phrase.file}`);
@@ -906,6 +934,13 @@ async function playPrivateVoice(
   privateVoiceAudio.onended = () => {
     restoreVoiceState();
     finishPlayback();
+  };
+  privateVoiceAudio.ontimeupdate = () => {
+    if (clipEndSeconds && privateVoiceAudio && privateVoiceAudio.currentTime >= clipEndSeconds) {
+      privateVoiceAudio.pause();
+      restoreVoiceState();
+      finishPlayback();
+    }
   };
   privateVoiceAudio.onerror = () => {
     restoreVoiceState();
@@ -2833,7 +2868,20 @@ onMounted(async () => {
   // внутри playPrivateVoice, поэтому C-3PO не принимает свой голос за команду.
   await inspectMicrophonePermission();
   navigator.mediaDevices?.addEventListener?.("devicechange", countMicrophones);
-  await playPrivateVoice("startup", true, true);
+  const startupPlayed = await playPrivateVoice("startup", true, true);
+  if (!startupPlayed && !silentMode.value && !chatOpen.value) {
+    const fallbackGreetings = commandLanguage.value === "ru"
+      ? ["Здравствуйте. Я готов.", "Приветствую. Слушаю вас.", "Добрый день. Чем помочь?"]
+      : [commandText("greeting")];
+    const previousGreeting = window.localStorage.getItem("c3po.last-startup-text");
+    const selectable = fallbackGreetings.length > 1
+      ? fallbackGreetings.filter((greeting) => greeting !== previousGreeting)
+      : fallbackGreetings;
+    const greeting = selectable[Math.floor(Math.random() * selectable.length)];
+    window.localStorage.setItem("c3po.last-startup-text", greeting);
+    lastCommand.value = greeting;
+    await speak(greeting);
+  }
 });
 
 onBeforeUnmount(() => {

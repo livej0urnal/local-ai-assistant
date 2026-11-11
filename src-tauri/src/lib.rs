@@ -336,7 +336,11 @@ fn show_main_window(app: tauri::AppHandle) {
 #[tauri::command]
 fn is_main_window_visible(app: tauri::AppHandle) -> bool {
     app.get_webview_window("main")
-        .and_then(|window| window.is_visible().ok())
+        .and_then(|window| {
+            let visible = window.is_visible().ok()?;
+            let minimized = window.is_minimized().unwrap_or(false);
+            Some(visible && !minimized)
+        })
         .unwrap_or(false)
 }
 
@@ -412,7 +416,17 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                {
+                    // WKWebView останавливает Web Speech после window.hide().
+                    // Свёрнутое окно визуально убрано, но сохраняет активную
+                    // аудиосессию, поэтому имя C-3PO слышно в фоне.
+                    let _ = window.minimize();
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = window.hide();
+                }
             }
         })
         .on_permission_request(|_, kind| {

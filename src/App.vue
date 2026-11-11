@@ -799,6 +799,7 @@ let droidAudioContext: AudioContext | null = null;
 let meterFrame = 0;
 let restartTimer = 0;
 let shouldListen = false;
+let recognitionRunning = false;
 let memoryTimer = 0;
 let schedulerTimer = 0;
 let voiceDemoIndex = 0;
@@ -1883,7 +1884,12 @@ function configureRecognition() {
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.onstart = () => {
+    recognitionRunning = true;
     if (voiceState.value !== "speaking") voiceState.value = "listening";
+    void writeLog("info", "voice.recognition", "Распознавание речи запущено", {
+      background: document.visibilityState !== "visible",
+      language: recognition?.lang,
+    });
   };
   recognition.onspeechstart = () => {
     // Web Speech уже отличил человеческую речь от обычного фонового шума.
@@ -1897,9 +1903,14 @@ function configureRecognition() {
     }
   };
   recognition.onend = () => {
-    if (shouldListen && voiceState.value !== "speaking") {
+    recognitionRunning = false;
+    void writeLog("info", "voice.recognition", "Сеанс распознавания завершён", {
+      shouldRestart: shouldListen,
+      voiceState: voiceState.value,
+    });
+    if (shouldListen) {
       window.clearTimeout(restartTimer);
-      restartTimer = window.setTimeout(startRecognition, 350);
+      restartTimer = window.setTimeout(startRecognition, voiceState.value === "speaking" ? 900 : 350);
     }
   };
   recognition.onerror = (event) => {
@@ -1948,15 +1959,17 @@ function startRecognition() {
   if (!recognition || microphonePermission.value !== "granted") return;
 
   shouldListen = true;
+  if (recognitionRunning) return;
   try {
     recognition.start();
-  } catch {
-    // Recognition is already active; the current session can continue.
+  } catch (error) {
+    void writeLog("warn", "voice.recognition", `Не удалось запустить распознавание: ${String(error)}`);
   }
 }
 
 function stopRecognition(nextState: VoiceState = "paused") {
   shouldListen = false;
+  recognitionRunning = false;
   window.clearTimeout(restartTimer);
   recognition?.stop();
   voiceState.value = nextState;

@@ -10,6 +10,12 @@ import droidPortrait from "./assets/protocol-droid.png";
 import { assistantPhrase, moviePhrase } from "./assistantPhrases";
 import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
 import { classifyQuickStartCommand, quickStartItems, type QuickStartItem } from "./quickStart";
+import {
+  parseScheduledTaskCommand,
+  type ScheduledTask,
+  type ScheduledTaskDraft,
+  type ScheduledTaskStatus,
+} from "./scheduler";
 
 type Message = {
   id: number;
@@ -277,24 +283,6 @@ type CodePatchResult = NativeActionResult & {
   rolledBack: boolean;
 };
 
-type ScheduledTaskStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
-type ScheduledTaskKind = "reminder" | "assistant" | "approval";
-
-type ScheduledTask = {
-  id: string;
-  title: string;
-  prompt: string;
-  runAt: string;
-  kind: ScheduledTaskKind;
-  status: ScheduledTaskStatus;
-  progress: number;
-  result: string;
-  createdAt: string;
-  updatedAt: string;
-  profileId: string;
-};
-
-type ScheduledTaskDraft = Pick<ScheduledTask, "title" | "prompt" | "runAt" | "kind">;
 
 type MailOverview = {
   source: string;
@@ -2853,62 +2841,6 @@ function parseInternetSearchCommand(text: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
-function parseScheduledTaskCommand(text: string): ScheduledTaskDraft | null {
-  const normalized = text.trim();
-  if (!/(?:напомни|запланируй|поставь\s+задачу|сделай|выполни|проверь|проанализируй|найди|remind|schedule)/iu.test(normalized)) {
-    return null;
-  }
-
-  const now = new Date();
-  let runAt: Date | null = null;
-  const duration = normalized.match(/через\s+(\d{1,4})\s*(минут\w*|час\w*|д(?:ень|ня|ней)|дн\w*)/iu);
-  if (duration) {
-    const amount = Number(duration[1]);
-    const unit = duration[2].toLowerCase();
-    const milliseconds = /минут/u.test(unit)
-      ? amount * 60_000
-      : /час/u.test(unit)
-        ? amount * 3_600_000
-        : amount * 86_400_000;
-    runAt = new Date(now.getTime() + milliseconds);
-  }
-
-  const absolute = normalized.match(/\b(сегодня|завтра)\b(?:\s+в)?\s+(\d{1,2})(?::(\d{2}))?/iu);
-  if (!runAt && absolute) {
-    const hour = Number(absolute[2]);
-    const minute = Number(absolute[3] || 0);
-    if (hour > 23 || minute > 59) return null;
-    runAt = new Date(now);
-    runAt.setSeconds(0, 0);
-    runAt.setHours(hour, minute, 0, 0);
-    if (absolute[1].toLowerCase() === "завтра") runAt.setDate(runAt.getDate() + 1);
-    if (runAt <= now) return null;
-  }
-
-  if (!runAt && /\bпозже\b/iu.test(normalized)) {
-    runAt = new Date(now.getTime() + 3_600_000);
-  }
-  if (!runAt) return null;
-
-  const reminder = /(?:^|\s)напомни(?:\s+мне)?\b|\bremind\b/iu.test(normalized);
-  const prompt = normalized
-    .replace(duration?.[0] || /$^/u, " ")
-    .replace(absolute?.[0] || /$^/u, " ")
-    .replace(/\bпозже\b/giu, " ")
-    .replace(/^(?:c-?3po[,\s]*)?/iu, "")
-    .replace(/^(?:напомни(?:\s+мне)?|запланируй|поставь\s+задачу)\s*/iu, "")
-    .replace(/\s+/gu, " ")
-    .trim();
-  if (!prompt) return null;
-  const requiresApproval = /(?:отправ|удал|перемест|переимен|введи|напиши\s+(?:в|контакту)|создай\s+(?:письмо|событие))/iu.test(prompt);
-  return {
-    title: prompt.slice(0, 80),
-    prompt,
-    runAt: runAt.toISOString(),
-    kind: reminder ? "reminder" : requiresApproval ? "approval" : "assistant",
-  };
-}
-
 function proposeScheduledTask(draft: ScheduledTaskDraft) {
   scheduledTaskDraft.value = draft;
   tasksOpen.value = true;
@@ -3479,6 +3411,11 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
     cancelAction();
     return;
   }
+  if (/(?:покажи|открой|список).*(?:задач|напомин)|(?:задач|напомин).*(?:покажи|открой|список)/iu.test(normalized)) {
+    tasksOpen.value = true;
+    lastCommand.value = `Активных задач: ${activeScheduledTaskCount.value}.`;
+    return;
+  }
   const scheduledTask = parseScheduledTaskCommand(text);
   if (scheduledTask) {
     proposeScheduledTask(scheduledTask);
@@ -3776,6 +3713,10 @@ async function runQuickStart(item: QuickStartItem) {
   }
   if (action.kind === "models") {
     llmOpen.value = true;
+    return;
+  }
+  if (action.kind === "tasks") {
+    tasksOpen.value = true;
     return;
   }
   if (action.kind === "permissions") {

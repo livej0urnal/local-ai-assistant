@@ -3,7 +3,7 @@ import test from "node:test";
 import { classifyQuickStartCommand, quickStartItems } from "../src/quickStart.ts";
 
 test("каждая функция быстрого старта имеет уникальный идентификатор и понятное описание", () => {
-  assert.equal(quickStartItems.length, 19);
+  assert.equal(quickStartItems.length, 20);
   assert.equal(new Set(quickStartItems.map((item) => item.id)).size, quickStartItems.length);
   for (const item of quickStartItems) {
     assert.ok(item.label.trim().length >= 4, `${item.id}: отсутствует название`);
@@ -23,7 +23,7 @@ for (const item of quickStartItems) {
       assert.match(item.action.template, /(?:письм|событи|перемести|исправь)/iu);
       return;
     }
-    assert.ok(["system-info", "chat", "models", "permissions", "voice-test"].includes(item.action.kind));
+    assert.ok(["system-info", "chat", "models", "tasks", "permissions", "voice-test"].includes(item.action.kind));
   });
 }
 

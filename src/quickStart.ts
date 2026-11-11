@@ -15,6 +15,7 @@ export type QuickStartAction =
   | { kind: "system-info" }
   | { kind: "chat" }
   | { kind: "models" }
+  | { kind: "tasks" }
   | { kind: "permissions" }
   | { kind: "voice-test" };
 
@@ -165,10 +166,17 @@ export const quickStartItems: readonly QuickStartItem[] = [
     },
   },
   {
+    id: "scheduled-tasks",
+    icon: "◷",
+    label: "Отложенные задачи",
+    description: "Планирование, прогресс и уведомления",
+    action: { kind: "tasks" },
+  },
+  {
     id: "models",
     icon: "◈",
     label: "Локальные модели",
-    description: "R2-D2, BB-8 и K-2SO",
+    description: "R2-D2, BB-8, K-2SO и BD-1",
     action: { kind: "models" },
   },
   {

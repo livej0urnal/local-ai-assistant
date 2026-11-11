@@ -7,7 +7,7 @@
     "dev": "vite",
     "dev:ensure": "node scripts/ensure-vite.mjs",
     "build": "vue-tsc --noEmit && vite build",
-    "test:quick-start": "node --experimental-strip-types --test tests/quick-start.test.mjs",
+    "test:quick-start": "node --experimental-strip-types --test tests/quick-start.test.mjs tests/scheduler.test.mjs",
     "test": "npm run test:quick-start && cargo test --manifest-path src-tauri/Cargo.toml",
     "preview": "vite preview",
     "desktop": "node scripts/run-desktop.mjs",

@@ -4,6 +4,21 @@ export type DirectoryListRequest = {
   filesOnly: boolean;
 };
 
+export type WakePhrase = {
+  command: string;
+};
+
+// Системное распознавание записывает имя по-разному: C3PO, «си три пи о»
+// или даже «с 3 по». Приветствие перед именем тоже считается обращением.
+export function parseWakePhrase(text: string): WakePhrase | null {
+  const wakeWord = /^\s*(?:(?:привет|эй|слушай|hello|hey)\s*[,!;:.-]*\s*)?(?:c\s*[- ]?(?:3|three)\s*[- ]?p\s*[- ]?o|(?:с|си)\s*[- ]?(?:3|три)\s*[- ]?(?:п|пи)\s*[- ]?о?|ситрипио)(?=\s|[,.:;!?-]|$)/iu;
+  const match = text.match(wakeWord);
+  if (!match) return null;
+  return {
+    command: text.slice(match[0].length).replace(/^[,.:;!?\s-]+/u, "").trim(),
+  };
+}
+
 // Простые операции с ОС маршрутизируются до обращения к модели. Так список
 // папки остаётся быстрым и фактическим даже при выключенной локальной LLM.
 export function parseDirectoryListCommand(text: string): DirectoryListRequest | null {

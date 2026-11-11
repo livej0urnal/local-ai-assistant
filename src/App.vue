@@ -10,7 +10,7 @@ import droidPortrait from "./assets/protocol-droid.png";
 import { assistantPhrase, moviePhrase } from "./assistantPhrases";
 import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
 import { classifyQuickStartCommand, quickStartItems, type QuickStartItem } from "./quickStart";
-import { parseDirectoryListCommand, type DirectoryListRequest } from "./commandRouting";
+import { parseDirectoryListCommand, parseWakePhrase, type DirectoryListRequest } from "./commandRouting";
 import {
   parseScheduledTaskCommand,
   type ScheduledTask,
@@ -995,12 +995,18 @@ async function ensureNotificationPermission() {
 }
 
 async function notifyFromBackground(body: string) {
-  if (document.visibilityState === "visible" || !(await ensureNotificationPermission())) return;
+  if ((await isMainWindowVisible()) || !(await ensureNotificationPermission())) return;
   sendNotification({
     title: "C-3PO",
     body: body.trim().slice(0, 500),
   });
   await writeLog("info", "notification.background", "Ответ показан системным уведомлением");
+}
+
+async function isMainWindowVisible() {
+  if (!("__TAURI_INTERNALS__" in window)) return document.visibilityState === "visible";
+  return invoke<boolean>("is_main_window_visible")
+    .catch(() => document.visibilityState === "visible");
 }
 
 async function loadPrivateVoiceCatalog() {
@@ -1823,23 +1829,25 @@ function getRecognitionConstructor(): RecognitionConstructor | undefined {
 async function handleRecognizedSpeech(text: string) {
   // Не позволяем микрофону принять голос самого C-3PO за новую команду.
   if (privateVoicePlaying) return;
-  // Системные распознаватели записывают имя по-разному, поэтому принимаем
-  // латинское C-3PO и наиболее частые русские транскрипции.
-  const wakeWord = /^\s*(?:c\s*[- ]?3\s*[- ]?p\s*[- ]?o\b|c3po\b|с\s*[- ]?3\s*[- ]?п\s*[- ]?о\b|си\s*[- ]?три\s*[- ]?пи\s*[- ]?о|ситрипио\b)/iu;
-  const wakeMatch = text.match(wakeWord);
+  const wakePhrase = parseWakePhrase(text);
+  const windowVisible = await isMainWindowVisible();
 
-  if (!wakeMatch) {
+  if (!wakePhrase) {
     // Пока окно скрыто, обычную речь игнорируем: C-3PO просыпается только
     // после своего имени и не превращает фоновые разговоры в команды.
-    if (document.visibilityState === "visible") processVoiceCommand(text);
+    if (windowVisible) processVoiceCommand(text);
     return;
   }
 
-  const command = text.replace(wakeWord, "").replace(/^[,.:;!?\s-]+/u, "").trim();
+  const command = wakePhrase.command;
+  await writeLog("info", "voice.wake-word", "Распознано обращение к C-3PO", {
+    background: !windowVisible,
+    hasCommand: Boolean(command),
+  });
   if (command) {
     // Полная команда с именем выполняется в фоне. Окно не прыгает поверх
     // текущей работы пользователя, а результат приходит уведомлением macOS.
-    const isBackgroundCommand = document.visibilityState !== "visible";
+    const isBackgroundCommand = !windowVisible;
     if (isBackgroundCommand) void notifyFromBackground("Слышу вас. Минутку, я советуюсь с R2-D2…");
     processVoiceCommand(command, isBackgroundCommand);
   } else {

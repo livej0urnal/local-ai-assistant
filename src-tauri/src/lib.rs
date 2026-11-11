@@ -333,6 +333,13 @@ fn show_main_window(app: tauri::AppHandle) {
     reveal_main_window(&app);
 }
 
+#[tauri::command]
+fn is_main_window_visible(app: tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
 fn quit_application(app: &tauri::AppHandle) {
     // Закрытие через меню должно завершать не только окно, но и оба фоновых
     // процесса. Обычный крестик по-прежнему лишь скрывает помощника.
@@ -428,6 +435,7 @@ pub fn run() {
             get_environment_report,
             get_process_metrics,
             show_main_window,
+            is_main_window_visible,
             executor::open_application,
             executor::get_automation_permissions,
             executor::capture_screen,

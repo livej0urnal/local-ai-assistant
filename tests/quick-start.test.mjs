@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyQuickStartCommand, quickStartItems } from "../src/quickStart.ts";
-import { parseDirectoryListCommand } from "../src/commandRouting.ts";
+import { parseDirectoryListCommand, parseWakePhrase } from "../src/commandRouting.ts";
 
 test("каждая функция быстрого старта имеет уникальный идентификатор и понятное описание", () => {
   assert.equal(quickStartItems.length, 20);
@@ -47,4 +47,12 @@ test("список файлов в стандартной папке не ухо
     parseDirectoryListCommand("Что находится в папке Projects"),
     { reference: "projects", limit: 20, filesOnly: false },
   );
+});
+
+test("имя C-3PO пробуждает скрытого помощника в вариантах распознавания", () => {
+  assert.deepEqual(parseWakePhrase("C-3PO какая погода"), { command: "какая погода" });
+  assert.deepEqual(parseWakePhrase("Привет, C3PO, открой калькулятор"), { command: "открой калькулятор" });
+  assert.deepEqual(parseWakePhrase("си три пи о"), { command: "" });
+  assert.deepEqual(parseWakePhrase("с 3 по покажи уведомление"), { command: "покажи уведомление" });
+  assert.equal(parseWakePhrase("просто фоновый разговор"), null);
 });

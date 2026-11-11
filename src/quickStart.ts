@@ -99,6 +99,16 @@ export const quickStartItems: readonly QuickStartItem[] = [
     },
   },
   {
+    id: "project-edit",
+    icon: "△",
+    label: "Исправить код проекта",
+    description: "Git-патч, автоматические тесты и откат",
+    action: {
+      kind: "template",
+      template: "Исправь проект local-ai-assistant: [опишите точное изменение]",
+    },
+  },
+  {
     id: "file-move",
     icon: "↗",
     label: "Переместить файл",

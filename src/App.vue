@@ -235,6 +235,20 @@ type ProjectContextReport = {
   context: string;
 };
 
+type CodePatchProposal = {
+  patch: string;
+  model: string;
+  message: string;
+};
+
+type CodePatchResult = NativeActionResult & {
+  files: string[];
+  testCommand: string;
+  testSuccess: boolean;
+  testOutput: string;
+  rolledBack: boolean;
+};
+
 type MailOverview = {
   source: string;
   unread: number;
@@ -2187,7 +2201,9 @@ async function undoLastAction() {
   try {
     const result = action.kind === "file-move"
       ? await invoke<NativeActionResult>("undo_file_action", { token: action.token })
-      : await invoke<NativeActionResult>("undo_productivity_action", action);
+      : action.kind === "code-patch"
+        ? await invoke<NativeActionResult>("undo_code_patch", { token: action.token })
+        : await invoke<NativeActionResult>("undo_productivity_action", action);
     lastUndoableAction.value = null;
     window.localStorage.removeItem("c3po.last-undoable-action");
     addMessage("assistant", result.message);
@@ -2585,6 +2601,13 @@ function parseProjectAnalysisCommand(text: string): { reference: string; questio
   };
 }
 
+function parseProjectEditCommand(text: string): { reference: string; instruction: string } | null {
+  const direct = text.match(/^(?:исправь|измени|доработай|отрефактори|fix|change|refactor)\s+проект\s+(.+?)\s*[:—]\s*(.+)$/iu);
+  if (direct) return { reference: cleanPathReference(direct[1]), instruction: direct[2].trim() };
+  const inverse = text.match(/^в\s+проекте\s+(.+?)\s+(?:исправь|измени|доработай|отрефактори)\s+(.+)$/iu);
+  return inverse ? { reference: cleanPathReference(inverse[1]), instruction: inverse[2].trim() } : null;
+}
+
 async function resolveFileReference(reference: string, directoryOnly = false) {
   return invoke<string>("resolve_file_reference", { reference, directoryOnly });
 }
@@ -2714,6 +2737,66 @@ async function analyzeLocalProject(request: { reference: string; question: strin
     speak(response);
     await writeLog("error", "agent.project-context", response);
   } finally {
+    isWorking.value = false;
+    if (voiceState.value === "thinking") voiceState.value = microphoneActive.value ? "listening" : "idle";
+  }
+}
+
+async function editLocalProject(request: { reference: string; instruction: string }, notifyInBackground: boolean) {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  const startedAt = performance.now();
+  isWorking.value = true;
+  isConsultingR2.value = true;
+  voiceState.value = "thinking";
+  lastCommand.value = `BB-8 индексирует проект и готовит проверяемый патч…`;
+  try {
+    await nextTick();
+    await playR2D2Signal("thinking");
+    const report = await invoke<ProjectContextReport>("build_project_context", {
+      reference: request.reference,
+      question: request.instruction,
+    });
+    if (!llmRuntime.value?.ready && !(await startLocalModel())) {
+      throw new Error("Локальная кодовая модель не запустилась");
+    }
+    const proposal = await invoke<CodePatchProposal>("generate_code_patch", {
+      instruction: request.instruction,
+      projectContext: report.context,
+      preferredModel: modelPreference.value === "auto" ? null : modelPreference.value,
+    });
+    lastCommand.value = "Rust проверяет пути патча и запускает тесты проекта…";
+    const result = await invoke<CodePatchResult>("apply_code_patch", {
+      root: report.root,
+      patch: proposal.patch,
+    });
+    if (result.success) {
+      rememberUndoableAction(result, `Изменение кода: ${result.files.join(", ")}`);
+      await playR2D2Signal("success");
+    } else {
+      await playR2D2Signal("error");
+    }
+    const outputTail = result.testOutput.trim().slice(-2_500);
+    const response = [
+      result.message,
+      `Модель: ${proposal.model}. Файлы: ${result.files.join(", ") || "нет"}.`,
+      `Проверка: ${result.testCommand} — ${result.testSuccess ? "успешно" : "ошибка"}.`,
+      outputTail ? `Последние строки проверки:\n${outputTail}` : "",
+      result.success ? "Изменение можно отменить кнопкой или командой «Отмени последнее действие»." : "",
+    ].filter(Boolean).join("\n\n");
+    addMessage("assistant", response);
+    lastCommand.value = result.message;
+    speak(result.message);
+    if (notifyInBackground) void notifyFromBackground(result.message);
+  } catch (error) {
+    const response = `Изменение кода остановлено: ${errorDetails(error).message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    await writeLog("error", "agent.code-patch", response);
+  } finally {
+    const remaining = 1_500 - (performance.now() - startedAt);
+    if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+    isConsultingR2.value = false;
     isWorking.value = false;
     if (voiceState.value === "thinking") voiceState.value = microphoneActive.value ? "listening" : "idle";
   }
@@ -3025,6 +3108,17 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   }
   if (pendingAction.value && /(отмен|нет|стоп)/.test(normalized)) {
     cancelAction();
+    return;
+  }
+  const projectEdit = parseProjectEditCommand(text);
+  if (projectEdit) {
+    if (/^\[?опишите\s+точное\s+изменение\]?$/iu.test(projectEdit.instruction)) {
+      const response = "Опишите конкретное изменение после двоеточия. Например: «Исправь проект local-ai-assistant: добавь проверку пустого имени файла».";
+      addMessage("assistant", response);
+      lastCommand.value = response;
+      return;
+    }
+    void editLocalProject(projectEdit, notifyInBackground);
     return;
   }
   const projectAnalysis = parseProjectAnalysisCommand(text);

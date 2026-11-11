@@ -210,6 +210,28 @@ function readStringArray(key: string): string[] {
   }
 }
 
+function readScheduledTasks(): ScheduledTask[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem("c3po.scheduled-tasks.v1") || "[]");
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is ScheduledTask => {
+      return typeof item?.id === "string"
+        && typeof item?.title === "string"
+        && typeof item?.prompt === "string"
+        && typeof item?.runAt === "string"
+        && Number.isFinite(Date.parse(item.runAt))
+        && ["reminder", "assistant", "approval"].includes(item.kind)
+        && ["pending", "running", "waiting", "completed", "failed", "cancelled"].includes(item.status);
+    }).slice(0, 200).map((item) => ({
+      ...item,
+      progress: Number.isFinite(item.progress) ? Math.max(0, Math.min(100, item.progress)) : 0,
+      result: typeof item.result === "string" ? item.result.slice(0, 4_000) : "",
+    }));
+  } catch {
+    return [];
+  }
+}
+
 type WeatherReport = {
   source: string;
   summary: string;
@@ -253,6 +275,25 @@ type CodePatchResult = NativeActionResult & {
   testOutput: string;
   rolledBack: boolean;
 };
+
+type ScheduledTaskStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+type ScheduledTaskKind = "reminder" | "assistant" | "approval";
+
+type ScheduledTask = {
+  id: string;
+  title: string;
+  prompt: string;
+  runAt: string;
+  kind: ScheduledTaskKind;
+  status: ScheduledTaskStatus;
+  progress: number;
+  result: string;
+  createdAt: string;
+  updatedAt: string;
+  profileId: string;
+};
+
+type ScheduledTaskDraft = Pick<ScheduledTask, "title" | "prompt" | "runAt" | "kind">;
 
 type MailOverview = {
   source: string;
@@ -694,6 +735,10 @@ const automationPermissions = ref<AutomationPermissions | null>(null);
 const llmOpen = ref(false);
 const languageOpen = ref(false);
 const settingsOpen = ref(false);
+const tasksOpen = ref(false);
+const scheduledTasks = ref<ScheduledTask[]>(readScheduledTasks());
+const scheduledTaskDraft = ref<ScheduledTaskDraft | null>(null);
+const schedulerRunning = ref(false);
 const onboardingOpen = ref(false);
 const onboardingBusy = ref(false);
 const onboardingStatus = ref("Готов начать проверку системы.");
@@ -751,6 +796,7 @@ let meterFrame = 0;
 let restartTimer = 0;
 let shouldListen = false;
 let memoryTimer = 0;
+let schedulerTimer = 0;
 let voiceDemoIndex = 0;
 let privateVoiceIndex = 0;
 let privateVoiceAudio: HTMLAudioElement | null = null;

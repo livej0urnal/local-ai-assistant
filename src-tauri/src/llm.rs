@@ -1074,7 +1074,30 @@ mod tests {
     fn recognises_specialised_model_roles() {
         assert_eq!(model_role("Qwen2.5-Coder-3B.gguf"), "code");
         assert_eq!(model_role("Qwen3-4B.gguf"), "writing-mail");
+        assert_eq!(model_role("Qwen2.5-VL-3B.gguf"), "vision");
         assert_eq!(model_role("Qwen2.5-1.5B.gguf"), "general");
+    }
+
+    #[test]
+    fn discovers_a_multimodal_model_without_listing_its_projector() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let vision = directory.path().join("Qwen2.5-VL-3B-Instruct-Q4_K_M");
+        fs::create_dir(&vision).expect("vision directory should be created");
+        fs::write(
+            vision.join("Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"),
+            b"GGUFmodel",
+        )
+        .expect("vision model should be written");
+        fs::write(
+            vision.join("mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"),
+            b"GGUFprojector",
+        )
+        .expect("projector should be written");
+
+        let models = discover_models(directory.path()).expect("models should be discovered");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].role, "vision");
+        assert_eq!(model_id(&models[0]), "Qwen2.5-VL-3B-Instruct-Q4_K_M");
     }
 
     #[test]

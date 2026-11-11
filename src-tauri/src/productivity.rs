@@ -498,4 +498,12 @@ mod tests {
         assert!(validate_calendar_event("", "bad", "bad", "").is_err());
         assert!(validate_calendar_event("Встреча", "tomorrow", "later", "").is_err());
     }
+
+    #[test]
+    fn validates_opaque_undo_tokens() {
+        assert!(validate_undo_token("x-apple-event-id:42").is_ok());
+        assert!(validate_undo_token("").is_err());
+        assert!(validate_undo_token("bad\ntoken").is_err());
+        assert!(validate_undo_token(&"x".repeat(513)).is_err());
+    }
 }

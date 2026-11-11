@@ -3,6 +3,8 @@ mod llm;
 mod productivity;
 mod project;
 mod tts;
+#[cfg(target_os = "macos")]
+mod wake_word;
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -464,6 +466,9 @@ pub fn run() {
         .manage(llm::LlmRuntime::default())
         .manage(tts::TtsRuntime::default())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            wake_word::start_native_wake_listener(app.handle().clone());
+
             let status = MenuItemBuilder::with_id("status", "● C-3PO работает в фоне")
                 .enabled(false)
                 .build(app)?;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   isPermissionGranted as isNotificationPermissionGranted,
   requestPermission as requestNotificationPermission,
@@ -800,6 +801,8 @@ let meterFrame = 0;
 let restartTimer = 0;
 let shouldListen = false;
 let recognitionRunning = false;
+let stopNativeWakeListener: (() => void) | null = null;
+let lastNativeWakeAt = 0;
 let memoryTimer = 0;
 let schedulerTimer = 0;
 let voiceDemoIndex = 0;
@@ -1492,10 +1495,6 @@ function deleteScheduledTask(task: ScheduledTask) {
 
 async function scheduledTaskToolContext(task: ScheduledTask): Promise<string | null> {
   const normalized = task.prompt.toLowerCase();
-  if (/(погод|weather)/iu.test(normalized)) {
-    const report = await invoke<WeatherReport>("get_current_weather", { location: currentWeatherLocation() });
-    return `Источник: ${report.source}. Актуальная сводка: ${report.summary}`;
-  }
   if (/(почт|письм|email|inbox)/iu.test(normalized)) {
     const overview = await invoke<MailOverview>("get_mail_overview", { limit: 20 });
     const messages = overview.messages.slice(0, 15).map((message, index) => [
@@ -1546,6 +1545,12 @@ async function runScheduledTask(task: ScheduledTask, manual = false) {
     let result = "";
     if (task.kind === "reminder") {
       result = `Напоминание: ${task.prompt}`;
+      task.progress = 100;
+    } else if (/(погод|weather)/iu.test(task.prompt)) {
+      // Для погоды модель не нужна: показываем фактическую сводку инструмента
+      // без риска получить выдуманный отказ от доступа к интернету.
+      const report = await invoke<WeatherReport>("get_current_weather", { location: currentWeatherLocation() });
+      result = report.summary;
       task.progress = 100;
     } else {
       if (!llmRuntime.value?.ready && !(await startLocalModel())) {
@@ -2859,7 +2864,7 @@ async function executeOpenApplicationCommand(application: string, followUp: stri
   }
 }
 
-async function answerWeatherQuestion(question: string, notifyInBackground: boolean) {
+async function answerWeatherQuestion(_question: string, notifyInBackground: boolean) {
   isWorking.value = true;
   voiceState.value = "thinking";
   lastCommand.value = "Получаю актуальную погоду в фоновом режиме…";
@@ -2872,20 +2877,13 @@ async function answerWeatherQuestion(question: string, notifyInBackground: boole
       source: report.source,
       characters: report.summary.length,
     });
-    const toolContext = `Источник: ${report.source}. Актуальная сводка: ${report.summary}`;
-    const reply = await askLocalModel(question, true, toolContext);
-    if (reply) {
-      if (notifyInBackground) void notifyFromBackground(reply);
-      return;
-    }
-
-    // Даже если локальная LLM временно не загрузилась, показываем реальные
-    // данные инструмента, а не придумываем погоду.
-    const fallback = `${report.summary}. Источник: ${report.source}.`;
-    addMessage("assistant", fallback);
-    lastCommand.value = fallback;
-    speak(fallback);
-    if (notifyInBackground) void notifyFromBackground(fallback);
+    // Погода является фактом, поэтому локальная модель не пересказывает её.
+    // Это исключает отказы «я не могу онлайн» и случайные языковые вставки.
+    const response = report.summary;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    if (notifyInBackground) void notifyFromBackground(response);
     isWorking.value = false;
   } catch (error) {
     const details = errorDetails(error);
@@ -3904,6 +3902,19 @@ onMounted(async () => {
     }
   }
   configureRecognition();
+  if ("__TAURI_INTERNALS__" in window) {
+    stopNativeWakeListener = await listen<string>("native-wake-word", async (event) => {
+      const now = Date.now();
+      if (now - lastNativeWakeAt < 1_500) return;
+      lastNativeWakeAt = now;
+      await writeLog("info", "voice.native-wake-word", "Получена нативная ключевая фраза", {
+        phrase: event.payload,
+      });
+      const response = "Слушаю вас.";
+      lastCommand.value = response;
+      if (!silentMode.value && !chatOpen.value) speak(response);
+    });
+  }
   if (privateVoiceCatalog.value && !(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound)) {
     synthesisAvailable.value = true;
     selectedVoiceName.value = "Локальный пакет voice.mp3";
@@ -3942,6 +3953,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopNativeWakeListener?.();
+  stopNativeWakeListener = null;
   navigator.mediaDevices?.removeEventListener?.("devicechange", countMicrophones);
   window.clearInterval(memoryTimer);
   window.clearInterval(schedulerTimer);

@@ -26,5 +26,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ureq = { version = "3.5.1", default-features = false, features = ["json", "rustls"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-avf-audio = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-speech = "0.3.2"
+
 [dev-dependencies]
 tempfile = "3.27.0"

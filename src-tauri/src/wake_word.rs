@@ -119,6 +119,7 @@ fn start_session(app: AppHandle) -> Result<(), String> {
             }
             // SAFETY: result действителен на протяжении вызова блока Apple.
             let text = unsafe { (&*result).bestTranscription().formattedString().to_string() };
+            let _ = callback_app.emit("native-speech-transcript", text.clone());
             if !contains_wake_phrase(&text) || callback_triggered.swap(true, Ordering::SeqCst) {
                 return;
             }
@@ -236,6 +237,11 @@ pub(crate) fn start_native_wake_listener(app: AppHandle) {
         });
     });
     unsafe { SFSpeechRecognizer::requestAuthorization(&authorization_block) };
+}
+
+pub(crate) fn restart_native_wake_listener(app: AppHandle) {
+    let main_app = app.clone();
+    let _ = app.run_on_main_thread(move || restart_session(main_app));
 }
 
 #[cfg(test)]

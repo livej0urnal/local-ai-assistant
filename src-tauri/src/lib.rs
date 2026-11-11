@@ -428,6 +428,20 @@ fn is_main_window_visible(app: tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+#[tauri::command]
+fn restart_native_wake_listener(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        wake_word::restart_native_wake_listener(app);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Нативное пробуждение доступно только на macOS".to_string())
+    }
+}
+
 fn quit_application(app: &tauri::AppHandle) {
     // Закрытие через меню должно завершать не только окно, но и оба фоновых
     // процесса. Обычный крестик по-прежнему лишь скрывает помощника.
@@ -538,6 +552,7 @@ pub fn run() {
             get_process_metrics,
             show_main_window,
             is_main_window_visible,
+            restart_native_wake_listener,
             executor::open_application,
             executor::get_automation_permissions,
             executor::capture_screen,

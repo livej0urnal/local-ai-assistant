@@ -802,6 +802,9 @@ let restartTimer = 0;
 let shouldListen = false;
 let recognitionRunning = false;
 let stopNativeWakeListener: (() => void) | null = null;
+let stopNativeTranscriptListener: (() => void) | null = null;
+let nativeTranscriptTimer = 0;
+let pendingNativeTranscript = "";
 let lastNativeWakeAt = 0;
 let memoryTimer = 0;
 let schedulerTimer = 0;
@@ -1867,6 +1870,15 @@ async function handleRecognizedSpeech(text: string) {
 function configureRecognition() {
   const Recognition = getRecognitionConstructor();
   synthesisAvailable.value = "speechSynthesis" in window;
+
+  if (environment.value?.platform === "macos" && environment.value.isAppBundle) {
+    // В пакетном приложении единым источником текста служит нативный локальный
+    // Speech framework. Одновременный Web Speech отбирает у него аудиосессию
+    // после сворачивания окна и приводит к aborted/not-allowed.
+    recognitionAvailable.value = false;
+    recognitionBlockedReason.value = "Используется локальное нативное распознавание macOS.";
+    return;
+  }
 
   // macOS аварийно завершает «голый» tauri dev-процесс при обращении к
   // SFSpeechRecognition. Системный API безопасно включаем только внутри .app,
@@ -3914,6 +3926,24 @@ onMounted(async () => {
       lastCommand.value = response;
       if (!silentMode.value && !chatOpen.value) speak(response);
     });
+    stopNativeTranscriptListener = await listen<string>("native-speech-transcript", (event) => {
+      const transcript = event.payload.trim();
+      if (!transcript) return;
+      if (voiceState.value === "speaking" || privateVoicePlaying) {
+        void invoke("restart_native_wake_listener");
+        return;
+      }
+      pendingNativeTranscript = transcript;
+      liveTranscript.value = transcript;
+      window.clearTimeout(nativeTranscriptTimer);
+      nativeTranscriptTimer = window.setTimeout(() => {
+        const finalTranscript = pendingNativeTranscript.trim();
+        pendingNativeTranscript = "";
+        liveTranscript.value = "";
+        if (finalTranscript) void handleRecognizedSpeech(finalTranscript);
+        void invoke("restart_native_wake_listener");
+      }, 900);
+    });
   }
   if (privateVoiceCatalog.value && !(ttsStatus.value?.runtimeFound && ttsStatus.value.referenceFound)) {
     synthesisAvailable.value = true;
@@ -3955,6 +3985,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopNativeWakeListener?.();
   stopNativeWakeListener = null;
+  stopNativeTranscriptListener?.();
+  stopNativeTranscriptListener = null;
+  window.clearTimeout(nativeTranscriptTimer);
   navigator.mediaDevices?.removeEventListener?.("devicechange", countMicrophones);
   window.clearInterval(memoryTimer);
   window.clearInterval(schedulerTimer);

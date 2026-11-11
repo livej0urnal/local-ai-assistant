@@ -231,7 +231,9 @@ function readScheduledTasks(): ScheduledTask[] {
     }).slice(0, 200).map((item) => ({
       ...item,
       status: item.status === "running" ? "pending" : item.status,
-      progress: Number.isFinite(item.progress) ? Math.max(0, Math.min(100, item.progress)) : 0,
+      progress: item.status === "running"
+        ? 0
+        : Number.isFinite(item.progress) ? Math.max(0, Math.min(100, item.progress)) : 0,
       result: typeof item.result === "string" ? item.result.slice(0, 4_000) : "",
     }));
   } catch {
@@ -1395,7 +1397,7 @@ async function analyzeCurrentScreen(question: string, notifyInBackground: boolea
 
 function persistScheduledTasks() {
   scheduledTasks.value.sort((left, right) => left.runAt.localeCompare(right.runAt));
-  window.localStorage.setItem("c3po.scheduled-tasks.v1", JSON.stringify(scheduledTasks.value.slice(-200)));
+  window.localStorage.setItem("c3po.scheduled-tasks.v1", JSON.stringify(scheduledTasks.value.slice(0, 200)));
 }
 
 function formatScheduledDate(value: string) {
@@ -4139,7 +4141,7 @@ onBeforeUnmount(() => {
           </section>
 
           <div v-if="scheduledTasks.length" class="task-list">
-            <article v-for="task in scheduledTasks.slice().sort((a, b) => b.runAt.localeCompare(a.runAt))" :key="task.id" class="task-card">
+            <article v-for="task in scheduledTasks.slice().sort((a, b) => a.runAt.localeCompare(b.runAt))" :key="task.id" class="task-card">
               <div class="task-card-head">
                 <span class="task-state" :class="task.status">{{ scheduledStatusLabel(task.status) }}</span>
                 <time>{{ formatScheduledDate(task.runAt) }}</time>

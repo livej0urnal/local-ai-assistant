@@ -1881,7 +1881,7 @@ button:disabled {
 .task-empty {
   border: 1px solid var(--line);
   border-radius: 20px;
-  background: color-mix(in srgb, var(--panel) 92%, var(--gold) 8%);
+  background: color-mix(in srgb, var(--surface) 92%, var(--gold) 8%);
 }
 
 .task-draft {
@@ -1901,10 +1901,10 @@ button:disabled {
 .task-draft input,
 .task-draft textarea {
   width: 100%;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface);
-  color: var(--text);
+  color: var(--ink);
   padding: 11px 13px;
   font: inherit;
   resize: vertical;
@@ -1923,7 +1923,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 11px;
   background: var(--surface);
-  color: var(--text);
+  color: var(--ink);
   padding: 9px 13px;
   cursor: pointer;
 }

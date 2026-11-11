@@ -37,7 +37,7 @@ export function parseScheduledTaskCommand(text: string, currentDate = new Date()
     runAt = new Date(now.getTime() + milliseconds);
   }
 
-  const absolute = normalized.match(/\b(сегодня|завтра)\b(?:\s+в)?\s+(\d{1,2})(?::(\d{2}))?/iu);
+  const absolute = normalized.match(/(?:^|\s)(сегодня|завтра)(?:\s+в)?\s+(\d{1,2})(?::(\d{2}))?/iu);
   if (!runAt && absolute) {
     const hour = Number(absolute[2]);
     const minute = Number(absolute[3] || 0);
@@ -49,14 +49,14 @@ export function parseScheduledTaskCommand(text: string, currentDate = new Date()
     if (runAt <= now) return null;
   }
 
-  if (!runAt && /\bпозже\b/iu.test(normalized)) runAt = new Date(now.getTime() + 3_600_000);
+  if (!runAt && /(?:^|\s)позже(?:\s|$)/iu.test(normalized)) runAt = new Date(now.getTime() + 3_600_000);
   if (!runAt) return null;
 
-  const reminder = /(?:^|\s)напомни(?:\s+мне)?\b|\bremind\b/iu.test(normalized);
+  const reminder = /(?:^|\s)напомни(?:\s+мне)?(?:\s|$)|\bremind\b/iu.test(normalized);
   const prompt = normalized
     .replace(duration?.[0] || /$^/u, " ")
     .replace(absolute?.[0] || /$^/u, " ")
-    .replace(/\bпозже\b/giu, " ")
+    .replace(/(?:^|\s)позже(?:\s|$)/giu, " ")
     .replace(/^(?:c-?3po[,\s]*)?/iu, "")
     .replace(/^(?:напомни(?:\s+мне)?|запланируй|поставь\s+задачу)\s*/iu, "")
     .replace(/\s+/gu, " ")

@@ -10,6 +10,7 @@ import droidPortrait from "./assets/protocol-droid.png";
 import { assistantPhrase, moviePhrase } from "./assistantPhrases";
 import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
 import { classifyQuickStartCommand, quickStartItems, type QuickStartItem } from "./quickStart";
+import { parseDirectoryListCommand, type DirectoryListRequest } from "./commandRouting";
 import {
   parseScheduledTaskCommand,
   type ScheduledTask,
@@ -2884,36 +2885,6 @@ function parseFileSearchCommand(text: string): string | null {
   return match ? match[1].trim().replace(/^[«"']|[»"']$/gu, "") : null;
 }
 
-function parseDirectoryListCommand(text: string): { reference: string; limit: number; filesOnly: boolean } | null {
-  const normalized = text.trim().toLowerCase();
-  if (!/(?:какие|покажи|перечисли|список|что\s+(?:есть|находится))/.test(normalized)
-    || !/(?:файл|папк|содержим)/.test(normalized)) return null;
-
-  const standardDirectory = normalized.match(
-    /(?:в|из)\s+(?:папк\w*\s+)?(документ(?:ы|ах|ов)?|загрузк(?:и|ах|у)?|рабоч(?:ий|ем)\s+стол(?:е)?|documents|downloads|desktop)\b/u,
-  )?.[1];
-  const explicitDirectory = normalized.match(/(?:в|из)\s+папк\w*\s+[«"']?(.+?)[»"']?(?:\s+(?:дай|покажи|первые|перв))?$/u)?.[1];
-  const rawReference = standardDirectory || explicitDirectory;
-  if (!rawReference) return null;
-
-  const directoryAliases: Record<string, string> = {
-    документы: "документы", документах: "документы", документов: "документы", documents: "documents",
-    загрузки: "загрузки", загрузках: "загрузки", загрузку: "загрузки", downloads: "downloads",
-    "рабочий стол": "рабочий стол", "рабочем столе": "рабочий стол", desktop: "desktop",
-  };
-  const numberWords: Record<string, number> = {
-    один: 1, одну: 1, первых: 1, два: 2, двух: 2, три: 3, трех: 3, трёх: 3,
-    четыре: 4, четырех: 4, четырёх: 4, пять: 5, пяти: 5, десять: 10, десяти: 10,
-  };
-  const limitToken = normalized.match(/перв\w*\s+(\d+|[а-яё]+)/u)?.[1];
-  const parsedLimit = limitToken ? (Number.parseInt(limitToken, 10) || numberWords[limitToken]) : 20;
-  return {
-    reference: directoryAliases[rawReference] || rawReference.trim(),
-    limit: Math.max(1, Math.min(parsedLimit || 20, 100)),
-    filesOnly: /файл/.test(normalized) && !/(?:папк|содержим)/.test(normalized.replace(/папк\w*\s+[«"']?.+?[»"']?/u, "")),
-  };
-}
-
 function parseInternetSearchCommand(text: string): string | null {
   const match = text.match(/^(?:найди|найти|поищи|поищите|search(?:\s+for)?)\s+(?:в\s+интернете|онлайн|в\s+сети|on\s+the\s+web)\s+(?:информацию\s+)?(?:о\s+|об\s+)?(.+)$/iu);
   return match?.[1]?.trim() || null;
@@ -3231,7 +3202,7 @@ async function answerFileSearch(query: string, notifyInBackground: boolean) {
 }
 
 async function answerDirectoryList(
-  request: { reference: string; limit: number; filesOnly: boolean },
+  request: DirectoryListRequest,
   notifyInBackground: boolean,
 ) {
   if (!("__TAURI_INTERNALS__" in window)) {

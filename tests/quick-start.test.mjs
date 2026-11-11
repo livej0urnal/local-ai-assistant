@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyQuickStartCommand, quickStartItems } from "../src/quickStart.ts";
+import { parseDirectoryListCommand } from "../src/commandRouting.ts";
 
 test("каждая функция быстрого старта имеет уникальный идентификатор и понятное описание", () => {
   assert.equal(quickStartItems.length, 20);
@@ -31,4 +32,19 @@ test("поиск в интернете не превращается в поис
   assert.equal(classifyQuickStartCommand("Найди в интернете документацию Tauri"), "browser-search");
   assert.equal(classifyQuickStartCommand("Найди в интернете последнюю погоду"), "weather");
   assert.equal(classifyQuickStartCommand("Найди файл отчет.pdf"), "file-search");
+});
+
+test("список файлов в стандартной папке не уходит к локальной модели", () => {
+  assert.deepEqual(
+    parseDirectoryListCommand("какие файлы в документах дай список первых трех"),
+    { reference: "документы", limit: 3, filesOnly: true },
+  );
+  assert.deepEqual(
+    parseDirectoryListCommand("Покажи первые 2 файла в Загрузках"),
+    { reference: "загрузки", limit: 2, filesOnly: true },
+  );
+  assert.deepEqual(
+    parseDirectoryListCommand("Что находится в папке Projects"),
+    { reference: "projects", limit: 20, filesOnly: false },
+  );
 });

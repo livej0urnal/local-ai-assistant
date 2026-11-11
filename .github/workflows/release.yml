@@ -61,6 +61,7 @@ jobs:
             C-3PO Local Assistant for macOS Apple Silicon, macOS Intel and Windows x64.
 
             Highlights:
+            - corrected full-bundle macOS signing for installers downloaded from the Internet;
             - local R2-D2, BB-8, K-2SO and BD-1 model routing;
             - voice and text conversations with background wake-up;
             - system, file, code, mail, calendar and screen analysis;
@@ -71,9 +72,28 @@ jobs:
             the official recommended GGUF pack after explicit confirmation (~8.5 GB). Models can also be
             installed individually. Personal voice samples, conversation history and personal data are
             never included in release assets.
-          releaseDraft: false
+          # Keep matrix artifacts private until every platform and signature check succeeds.
+          releaseDraft: true
           prerelease: false
           args: "--target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json"
+      - name: Verify macOS application signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          dmg_files=(target/${{ matrix.target }}/release/bundle/dmg/*.dmg)
+          test "${#dmg_files[@]}" -eq 1
+
+          mount_path="$RUNNER_TEMP/c3po-signature-${{ matrix.target }}"
+          mkdir -p "$mount_path"
+          hdiutil attach "${dmg_files[0]}" -readonly -nobrowse -mountpoint "$mount_path"
+          trap 'hdiutil detach "$mount_path" || true' EXIT
+
+          app_path="$mount_path/C-3PO.app"
+          test -d "$app_path"
+          test -f "$app_path/Contents/_CodeSignature/CodeResources"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          codesign --display --verbose=2 "$app_path"
 
   checksums:
     name: Publish SHA-256 checksums
@@ -93,3 +113,7 @@ jobs:
           cd release-assets
           find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           gh release upload "${GITHUB_REF_NAME}" SHA256SUMS.txt --repo "${GITHUB_REPOSITORY}" --clobber
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false

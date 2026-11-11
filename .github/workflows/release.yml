@@ -67,7 +67,7 @@ jobs:
       - name: Stage llama-server sidecar
         run: node scripts/stage-llama-sidecar.mjs ${{ matrix.target }}
       - name: Build and upload installers
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

@@ -3,6 +3,11 @@
 Все заметные изменения C-3PO Local Assistant описываются в этом файле. Версии следуют
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] — 2026-11-11
+
+- возвращено проверенное действие упаковки Tauri, использованное успешным выпуском 0.1.6;
+- сохранена отдельная кроссплатформенная проверка Windows перед созданием установщика.
+
 ## [1.0.1] — 2026-11-11
 
 - исправлена проверка Windows в релизном CI: платформенная компиляция и тесты выполняются отдельно,
@@ -34,5 +39,6 @@
 - удаление, отправка и необратимые действия требуют подтверждения;
 - кроссплатформенная сборка DMG/NSIS и публикация SHA-256 через GitHub Actions.
 
+[1.0.2]: https://github.com/livej0urnal/local-ai-assistant/releases/tag/v1.0.2
 [1.0.1]: https://github.com/livej0urnal/local-ai-assistant/releases/tag/v1.0.1
 [1.0.0]: https://github.com/livej0urnal/local-ai-assistant/releases/tag/v1.0.0

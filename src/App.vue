@@ -130,7 +130,7 @@ type StartupVoiceVariant = Pick<PrivateVoicePhrase, "id" | "text" | "file"> & {
 };
 
 const startupVoiceVariants: StartupVoiceVariant[] = [
-  { id: "phrase-025", text: "О, привет. Я C-3PO.", file: "phrase-025.mp3", clipEndSeconds: 2.35 },
+  { id: "phrase-025", text: "О, привет. Я C-3PO.", file: "phrase-025.mp3" },
   { id: "phrase-026", text: "О, привет. По-моему, нас не представили друг другу.", file: "phrase-026.mp3" },
   { id: "phrase-028", text: "О, здравствуйте. Чем могу быть полезен?", file: "phrase-028.mp3", clipEndSeconds: 3.8 },
 ];
@@ -250,6 +250,17 @@ type FileSearchReport = {
   query: string;
   scope: string;
   paths: string[];
+  truncated: boolean;
+};
+
+type DirectoryListReport = {
+  directory: string;
+  entries: Array<{
+    name: string;
+    path: string;
+    kind: "file" | "directory";
+    sizeBytes: number | null;
+  }>;
   truncated: boolean;
 };
 
@@ -2200,6 +2211,37 @@ async function ensureTtsServer() {
   }
 }
 
+function russianIntegerWords(value: number): string {
+  if (!Number.isInteger(value) || value < 0 || value > 999_999) return String(value);
+  if (value === 0) return "ноль";
+  const units = ["", "один", "два", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять"];
+  const teens = ["десять", "одиннадцать", "двенадцать", "тринадцать", "четырнадцать", "пятнадцать", "шестнадцать", "семнадцать", "восемнадцать", "девятнадцать"];
+  const tens = ["", "", "двадцать", "тридцать", "сорок", "пятьдесят", "шестьдесят", "семьдесят", "восемьдесят", "девяносто"];
+  const hundreds = ["", "сто", "двести", "триста", "четыреста", "пятьсот", "шестьсот", "семьсот", "восемьсот", "девятьсот"];
+  const belowThousand = (part: number, feminine = false) => {
+    const words: string[] = [];
+    if (part >= 100) words.push(hundreds[Math.floor(part / 100)]);
+    const remainder = part % 100;
+    if (remainder >= 10 && remainder < 20) words.push(teens[remainder - 10]);
+    else {
+      if (remainder >= 20) words.push(tens[Math.floor(remainder / 10)]);
+      const unit = remainder % 10;
+      if (unit) words.push(feminine && unit === 1 ? "одна" : feminine && unit === 2 ? "две" : units[unit]);
+    }
+    return words;
+  };
+  const words: string[] = [];
+  const thousands = Math.floor(value / 1_000);
+  if (thousands) {
+    words.push(...belowThousand(thousands, true));
+    const lastTwo = thousands % 100;
+    const last = thousands % 10;
+    words.push(lastTwo >= 11 && lastTwo <= 14 ? "тысяч" : last === 1 ? "тысяча" : last >= 2 && last <= 4 ? "тысячи" : "тысяч");
+  }
+  words.push(...belowThousand(value % 1_000));
+  return words.join(" ");
+}
+
 function prepareSpeechText(text: string) {
   const codeNotice = commandLanguage.value === "ru"
     ? "Фрагмент кода показан в истории диалога."
@@ -2224,7 +2266,10 @@ function prepareSpeechText(text: string) {
       .replace(/\bR\s*2\s*[- ]?D\s*2\b/giu, "Эр-два-Дэ-два")
       .replace(/\bRAM\b/giu, "оперативная память")
       .replace(/\bmacOS\b/giu, "мак-о-эс")
-      .replace(/\bWindows\b/giu, "Виндоус");
+      .replace(/\bWindows\b/giu, "Виндоус")
+      // Голосовой клон может произносить голые цифры с акцентом языка,
+      // встречавшегося в обучении. Русские слова фиксируют произношение.
+      .replace(/\d{1,6}/gu, (number) => russianIntegerWords(Number(number)));
   }
   return spoken.replace(/(?:\.\s*){2,}/gu, ". ").trim();
 }
@@ -2839,6 +2884,36 @@ function parseFileSearchCommand(text: string): string | null {
   return match ? match[1].trim().replace(/^[«"']|[»"']$/gu, "") : null;
 }
 
+function parseDirectoryListCommand(text: string): { reference: string; limit: number; filesOnly: boolean } | null {
+  const normalized = text.trim().toLowerCase();
+  if (!/(?:какие|покажи|перечисли|список|что\s+(?:есть|находится))/.test(normalized)
+    || !/(?:файл|папк|содержим)/.test(normalized)) return null;
+
+  const standardDirectory = normalized.match(
+    /(?:в|из)\s+(?:папк\w*\s+)?(документ(?:ы|ах|ов)?|загрузк(?:и|ах|у)?|рабоч(?:ий|ем)\s+стол(?:е)?|documents|downloads|desktop)\b/u,
+  )?.[1];
+  const explicitDirectory = normalized.match(/(?:в|из)\s+папк\w*\s+[«"']?(.+?)[»"']?(?:\s+(?:дай|покажи|первые|перв))?$/u)?.[1];
+  const rawReference = standardDirectory || explicitDirectory;
+  if (!rawReference) return null;
+
+  const directoryAliases: Record<string, string> = {
+    документы: "документы", документах: "документы", документов: "документы", documents: "documents",
+    загрузки: "загрузки", загрузках: "загрузки", загрузку: "загрузки", downloads: "downloads",
+    "рабочий стол": "рабочий стол", "рабочем столе": "рабочий стол", desktop: "desktop",
+  };
+  const numberWords: Record<string, number> = {
+    один: 1, одну: 1, первых: 1, два: 2, двух: 2, три: 3, трех: 3, трёх: 3,
+    четыре: 4, четырех: 4, четырёх: 4, пять: 5, пяти: 5, десять: 10, десяти: 10,
+  };
+  const limitToken = normalized.match(/перв\w*\s+(\d+|[а-яё]+)/u)?.[1];
+  const parsedLimit = limitToken ? (Number.parseInt(limitToken, 10) || numberWords[limitToken]) : 20;
+  return {
+    reference: directoryAliases[rawReference] || rawReference.trim(),
+    limit: Math.max(1, Math.min(parsedLimit || 20, 100)),
+    filesOnly: /файл/.test(normalized) && !/(?:папк|содержим)/.test(normalized.replace(/папк\w*\s+[«"']?.+?[»"']?/u, "")),
+  };
+}
+
 function parseInternetSearchCommand(text: string): string | null {
   const match = text.match(/^(?:найди|найти|поищи|поищите|search(?:\s+for)?)\s+(?:в\s+интернете|онлайн|в\s+сети|on\s+the\s+web)\s+(?:информацию\s+)?(?:о\s+|об\s+)?(.+)$/iu);
   return match?.[1]?.trim() || null;
@@ -3149,6 +3224,55 @@ async function answerFileSearch(query: string, notifyInBackground: boolean) {
     lastCommand.value = response;
     speak(response);
     await writeLog("error", "tool.file-search", response);
+  } finally {
+    isWorking.value = false;
+    voiceState.value = microphoneActive.value ? "listening" : "idle";
+  }
+}
+
+async function answerDirectoryList(
+  request: { reference: string; limit: number; filesOnly: boolean },
+  notifyInBackground: boolean,
+) {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    const response = "Содержимое папок доступно только в настольном приложении C-3PO.";
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    return;
+  }
+  isWorking.value = true;
+  voiceState.value = "thinking";
+  lastCommand.value = `Читаю папку «${request.reference}»…`;
+  try {
+    const report = await invoke<DirectoryListReport>("list_directory", {
+      reference: request.reference,
+      limit: request.limit,
+      filesOnly: request.filesOnly,
+    });
+    const response = report.entries.length
+      ? [
+          `${request.filesOnly ? "Файлы" : "Содержимое"} в ${report.directory}:`,
+          ...report.entries.map((entry, index) => `${index + 1}. ${entry.kind === "directory" ? "📁 " : ""}${entry.name}`),
+          report.truncated ? `Показаны первые ${report.entries.length}.` : "",
+        ].filter(Boolean).join("\n")
+      : `В папке ${report.directory} ${request.filesOnly ? "нет файлов" : "нет элементов"}.`;
+    addMessage("assistant", response);
+    lastCommand.value = report.entries.length
+      ? `Готово. Показал ${report.entries.length} ${request.filesOnly ? "файлов" : "элементов"} в диалоге.`
+      : response;
+    speak(lastCommand.value);
+    if (notifyInBackground) void notifyFromBackground(lastCommand.value);
+    await writeLog("info", "tool.directory-list", "Содержимое папки прочитано", {
+      directory: report.directory,
+      results: report.entries.length,
+      truncated: report.truncated,
+    });
+  } catch (error) {
+    const response = `Не удалось прочитать папку: ${errorDetails(error).message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    await writeLog("error", "tool.directory-list", response);
   } finally {
     isWorking.value = false;
     voiceState.value = microphoneActive.value ? "listening" : "idle";
@@ -3514,6 +3638,11 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   const internetSearchQuery = parseInternetSearchCommand(text);
   if (internetSearchQuery) {
     void answerInternetSearch(internetSearchQuery, notifyInBackground);
+    return;
+  }
+  const directoryList = parseDirectoryListCommand(text);
+  if (directoryList) {
+    void answerDirectoryList(directoryList, notifyInBackground);
     return;
   }
   const fileSearchQuery = parseFileSearchCommand(text);

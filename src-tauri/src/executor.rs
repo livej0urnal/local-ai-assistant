@@ -111,6 +111,23 @@ pub(crate) struct FileSearchReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DirectoryEntryReport {
+    name: String,
+    path: String,
+    kind: String,
+    size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DirectoryListReport {
+    directory: String,
+    entries: Vec<DirectoryEntryReport>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct FileContentReport {
     path: String,
     name: String,
@@ -310,6 +327,75 @@ pub(crate) async fn search_files(
     tauri::async_runtime::spawn_blocking(move || search_files_native(query, limit))
         .await
         .map_err(|error| format!("Локальный поиск неожиданно остановился: {error}"))?
+}
+
+fn list_directory_native(
+    reference: String,
+    limit: Option<usize>,
+    files_only: Option<bool>,
+) -> Result<DirectoryListReport, String> {
+    let directory = resolve_file_reference_native(reference, true)?;
+    let directory = PathBuf::from(directory);
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    let files_only = files_only.unwrap_or(false);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|error| format!("Не удалось прочитать папку: {error}"))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            // Не переходим по ссылкам: список должен описывать только содержимое
+            // выбранной папки и не расширять разрешённую область чтения.
+            if file_type.is_symlink() || (files_only && !file_type.is_file()) {
+                return None;
+            }
+            let metadata = entry.metadata().ok();
+            Some(DirectoryEntryReport {
+                name: entry.file_name().to_string_lossy().to_string(),
+                path: entry.path().display().to_string(),
+                kind: if file_type.is_dir() {
+                    "directory"
+                } else {
+                    "file"
+                }
+                .to_string(),
+                size_bytes: file_type
+                    .is_file()
+                    .then(|| metadata.map(|value| value.len()))
+                    .flatten(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    let truncated = entries.len() > limit;
+    entries.truncate(limit);
+    audit_action(
+        "directory-list",
+        "low",
+        "completed",
+        serde_json::json!({ "directory": directory, "results": entries.len(), "truncated": truncated }),
+    );
+    Ok(DirectoryListReport {
+        directory: directory.display().to_string(),
+        entries,
+        truncated,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn list_directory(
+    reference: String,
+    limit: Option<usize>,
+    files_only: Option<bool>,
+) -> Result<DirectoryListReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_directory_native(reference, limit, files_only)
+    })
+    .await
+    .map_err(|error| format!("Чтение папки неожиданно остановилось: {error}"))?
 }
 
 pub(crate) fn resolve_file_reference_native(
@@ -1562,6 +1648,25 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].ends_with("Quarterly Report.txt"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lists_immediate_files_with_a_limit() {
+        let home = user_home().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("c3po-directory-list-")
+            .tempdir_in(home)
+            .unwrap();
+        fs::write(root.path().join("alpha.txt"), "a").unwrap();
+        fs::write(root.path().join("beta.txt"), "bb").unwrap();
+        fs::create_dir(root.path().join("Archive")).unwrap();
+
+        let report =
+            list_directory_native(root.path().display().to_string(), Some(1), Some(true)).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].name, "alpha.txt");
+        assert_eq!(report.entries[0].kind, "file");
+        assert!(report.truncated);
     }
 
     #[test]

@@ -436,6 +436,7 @@ pub fn run() {
             executor::search_in_browser,
             executor::search_web,
             executor::search_files,
+            executor::list_directory,
             executor::resolve_file_reference,
             executor::read_text_file,
             executor::move_file,

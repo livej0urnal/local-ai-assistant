@@ -729,7 +729,7 @@ button:disabled {
 
 .command-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
 }
 
@@ -2727,7 +2727,7 @@ button:disabled {
   to { height: 27px; opacity: 1; }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1240px) {
   .app-header {
     grid-template-columns: 1fr auto;
   }
@@ -2735,6 +2735,17 @@ button:disabled {
   .environment-chip {
     display: none;
   }
+}
+
+@media (max-width: 1000px) {
+  .task-button > span:not(.button-icon),
+  .language-button > span:not(.button-icon),
+  .header-actions > .ghost-button:not(.model-button, .task-button, .language-button, .settings-button) > span {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
 
   .voice-hero {
     grid-template-columns: 0.8fr 1.2fr;
@@ -2746,6 +2757,21 @@ button:disabled {
 
   .command-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 800px) and (min-width: 701px) {
+  .voice-hero,
+  .droid-console {
+    min-height: 320px;
+  }
+
+  .droid-console img {
+    max-height: 345px;
+  }
+
+  .quick-panel {
+    padding-top: 18px;
   }
 }
 

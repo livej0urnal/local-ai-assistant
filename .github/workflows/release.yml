@@ -62,6 +62,7 @@ jobs:
 
             Highlights:
             - corrected full-bundle macOS signing for installers downloaded from the Internet;
+            - restored microphone access for the signed Hardened Runtime application;
             - local R2-D2, BB-8, K-2SO and BD-1 model routing;
             - voice and text conversations with background wake-up;
             - system, file, code, mail, calendar and screen analysis;

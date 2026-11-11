@@ -1,4 +1,5 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dirname, "..");
@@ -20,12 +21,19 @@ const build = spawnSync("npm", ["run", "tauri", "build", "--", "--bundles", "app
 
 if (build.status !== 0) process.exit(build.status ?? 1);
 
-const appPath = resolve(projectRoot, "src-tauri/target/release/bundle/macos/C-3PO.app");
-const application = spawn("open", ["-n", appPath], {
+// Cargo workspace keeps one shared target directory at the project root.
+// Do not use `-n`: it would force macOS to start a second C-3PO instance.
+const appPath = resolve(projectRoot, "target/release/bundle/macos/C-3PO.app");
+if (!existsSync(appPath)) {
+  console.error(`Свежая сборка C-3PO не найдена: ${appPath}`);
+  process.exit(1);
+}
+
+const application = spawnSync("open", [appPath], {
   cwd: projectRoot,
-  detached: true,
-  stdio: "ignore",
+  stdio: "inherit",
 });
-application.unref();
+
+if (application.status !== 0) process.exit(application.status ?? 1);
 
 console.log(`C-3PO открыт: ${appPath}`);

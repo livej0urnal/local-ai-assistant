@@ -941,6 +941,28 @@ async function installRecommendedModels() {
   }
 }
 
+async function deleteLocalModel(model: LocalModelFile) {
+  if (!("__TAURI_INTERNALS__" in window) || llmLoading.value) return;
+  if (!window.confirm(`Удалить локальную модель «${model.name}» (${formatBytes(model.sizeBytes)})? Файл придётся скачать заново.`)) return;
+  llmLoading.value = true;
+  try {
+    modelInstallMessage.value = await invoke<string>("delete_local_model", { name: model.name });
+    if (modelPreference.value === model.name) {
+      modelPreference.value = "auto";
+      window.localStorage.setItem("c3po.model-preference", "auto");
+    }
+    await loadLlmStatus();
+    llmRuntime.value = await invoke<LlmRuntimeStatus>("get_llm_runtime_status");
+    await writeLog("info", "llm.delete", "Локальная модель удалена", { model: model.name });
+  } catch (error) {
+    const details = errorDetails(error);
+    modelInstallMessage.value = `Не удалось удалить модель: ${details.message}`;
+    await writeLog("error", "llm.delete", `${details.name}: ${details.message}`, { model: model.name });
+  } finally {
+    llmLoading.value = false;
+  }
+}
+
 async function waitForLocalModel() {
   // Не оставляем интерфейс в бесконечном ожидании, если llama-server не смог
   // запуститься (например, порт уже занят старым процессом).
@@ -3094,6 +3116,13 @@ onBeforeUnmount(() => {
               {{ profile.model?.name === modelPreference ? "выбрано" : (profile.model ? "готов" : "нет файла") }}
             </b>
           </button>
+        </section>
+
+        <section v-if="llmStatus?.models?.length" class="installed-model-list" aria-label="Установленные файлы моделей">
+          <article v-for="model in llmStatus.models" :key="model.name">
+            <span><strong>{{ model.name }}</strong><small>{{ formatBytes(model.sizeBytes) }} · {{ model.validGguf ? "GGUF проверен" : "повреждён" }}</small></span>
+            <button type="button" :disabled="llmLoading" @click="deleteLocalModel(model)">Удалить</button>
+          </article>
         </section>
 
         <div class="model-checklist">

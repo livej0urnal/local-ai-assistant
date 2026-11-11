@@ -2138,6 +2138,50 @@ button:disabled {
   background: #f7edda;
 }
 
+.installed-model-list {
+  margin: 0 24px 16px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.installed-model-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.installed-model-list article:last-child { border-bottom: 0; }
+.installed-model-list span { min-width: 0; }
+.installed-model-list strong,
+.installed-model-list small { display: block; }
+.installed-model-list strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.installed-model-list small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+}
+.installed-model-list button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--danger);
+  background: transparent;
+  font-size: 9px;
+  font-weight: 800;
+}
+
 .model-checklist {
   margin: 0 24px;
   overflow: hidden;
@@ -2562,6 +2606,7 @@ button:disabled {
 
   .model-state,
   .droid-model-selector,
+  .installed-model-list,
   .model-checklist,
   .model-path {
     margin-right: 16px;

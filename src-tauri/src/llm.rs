@@ -250,6 +250,43 @@ pub(crate) async fn install_recommended_models() -> Result<ModelInstallReport, S
         .map_err(|error| format!("Установка моделей неожиданно остановилась: {error}"))?
 }
 
+#[tauri::command]
+pub(crate) fn delete_local_model(
+    name: String,
+    runtime: State<'_, LlmRuntime>,
+) -> Result<String, String> {
+    if !valid_model_name(&name) {
+        return Err("Некорректное имя модели".to_string());
+    }
+
+    let directory = model_directory()?;
+    let model = discover_models(&directory)?
+        .into_iter()
+        .find(|model| model.name == name)
+        .ok_or_else(|| "Модель не найдена в локальной папке C-3PO".to_string())?;
+
+    let mut child = runtime
+        .child
+        .lock()
+        .map_err(|_| "Процесс локальной модели временно недоступен".to_string())?;
+    if let Some(mut process) = child.take() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    drop(child);
+
+    fs::remove_file(&model.path)
+        .map_err(|error| format!("Не удалось удалить модель «{}»: {error}", model.name))?;
+    Ok(format!("Модель «{}» удалена.", model.name))
+}
+
+fn valid_model_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 255
+        && Path::new(name).file_name().and_then(|value| value.to_str()) == Some(name)
+        && name.to_ascii_lowercase().ends_with(".gguf")
+}
+
 fn discover_models(directory: &Path) -> Result<Vec<LocalModelFile>, String> {
     let mut models = Vec::new();
     let entries = fs::read_dir(directory).map_err(|error| error.to_string())?;
@@ -719,6 +756,16 @@ mod tests {
         assert_eq!(model_role("Qwen2.5-Coder-3B.gguf"), "code");
         assert_eq!(model_role("Qwen3-4B.gguf"), "writing-mail");
         assert_eq!(model_role("Qwen2.5-1.5B.gguf"), "general");
+    }
+
+    #[test]
+    fn accepts_only_plain_gguf_names_for_deletion() {
+        assert!(valid_model_name("qwen.gguf"));
+        assert!(valid_model_name("Qwen3-4B.GGUF"));
+        assert!(!valid_model_name("../qwen.gguf"));
+        assert!(!valid_model_name("models/qwen.gguf"));
+        assert!(!valid_model_name("qwen.txt"));
+        assert!(!valid_model_name(""));
     }
 
     #[test]

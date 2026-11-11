@@ -4,6 +4,7 @@ export type QuickStartRoute =
   | "browser-search"
   | "application-open"
   | "file-search"
+  | "file-analysis"
   | "mail-analysis"
   | "calendar-analysis";
 
@@ -77,6 +78,20 @@ export const quickStartItems: readonly QuickStartItem[] = [
     label: "Найди файл README.md",
     description: "Локальный поиск по имени на компьютере",
     action: { kind: "command", command: "Найди файл README.md", expectedRoute: "file-search" },
+  },
+  {
+    id: "file-analysis",
+    icon: "▤",
+    label: "Проанализируй файл README.md",
+    description: "Локальное чтение и анализ через R2-D2",
+    action: { kind: "command", command: "Проанализируй файл README.md", expectedRoute: "file-analysis" },
+  },
+  {
+    id: "file-move",
+    icon: "↗",
+    label: "Переместить файл",
+    description: "Обратимое перемещение между папками",
+    action: { kind: "template", template: "Перемести файл имя.txt в папку Документы" },
   },
   {
     id: "telegram",
@@ -158,6 +173,7 @@ export function classifyQuickStartCommand(command: string): QuickStartRoute | nu
     return "browser-search";
   }
   if (/^(?:найди|найти|поищи|отыщи|find|search\s+for)(?:\s|$)/u.test(normalized)) return "file-search";
+  if (/^(?:проанализируй|разбери|изучи|analyze|summarize)(?:\s)+(?:файл|документ|file|document)(?:\s|$)/u.test(normalized)) return "file-analysis";
   if (/(проанализ|разбер|сортир|приоритет|важн|непрочитан).*(почт|письм|email|inbox)/u.test(normalized)) {
     return "mail-analysis";
   }

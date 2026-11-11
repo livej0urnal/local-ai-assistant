@@ -101,6 +101,77 @@ pub(crate) struct FileSearchReport {
     truncated: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileContentReport {
+    path: String,
+    name: String,
+    size_bytes: u64,
+    content: String,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileActionResult {
+    success: bool,
+    message: String,
+    undo_kind: Option<String>,
+    undo_token: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Serialize)]
+struct FileMoveUndo {
+    from: String,
+    to: String,
+}
+
+fn user_home() -> Result<PathBuf, String> {
+    directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .ok_or_else(|| "Не удалось определить домашнюю папку пользователя".to_string())
+}
+
+fn ensure_path_in_home(path: &Path, must_exist: bool) -> Result<PathBuf, String> {
+    let home = user_home()?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let checked = if must_exist {
+        path.canonicalize()
+            .map_err(|error| format!("Путь не найден: {error}"))?
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "У пути отсутствует родительская папка".to_string())?
+            .canonicalize()
+            .map_err(|error| format!("Папка назначения недоступна: {error}"))?;
+        parent.join(
+            path.file_name()
+                .ok_or_else(|| "Некорректное имя файла".to_string())?,
+        )
+    };
+    if !checked.starts_with(&home) {
+        return Err("Разрешены только файлы внутри домашней папки пользователя".to_string());
+    }
+    Ok(checked)
+}
+
+fn standard_directory(reference: &str) -> Option<PathBuf> {
+    let dirs = directories::UserDirs::new()?;
+    match normalize(reference).as_str() {
+        "рабочий стол" | "desktop" => dirs.desktop_dir().map(Path::to_path_buf),
+        "документы" | "documents" => dirs.document_dir().map(Path::to_path_buf),
+        "загрузки" | "downloads" => dirs.download_dir().map(Path::to_path_buf),
+        "музыка" | "music" => dirs.audio_dir().map(Path::to_path_buf),
+        "изображения" | "картинки" | "pictures" => {
+            dirs.picture_dir().map(Path::to_path_buf)
+        }
+        "видео" | "videos" => dirs.video_dir().map(Path::to_path_buf),
+        "домашняя папка" | "home" => Some(dirs.home_dir().to_path_buf()),
+        _ => None,
+    }
+}
+
 fn validate_file_search_query(value: &str) -> Result<String, String> {
     let query = value.trim();
     if query.is_empty() || query.chars().count() > 160 || query.chars().any(char::is_control) {
@@ -231,6 +302,264 @@ pub(crate) async fn search_files(
     tauri::async_runtime::spawn_blocking(move || search_files_native(query, limit))
         .await
         .map_err(|error| format!("Локальный поиск неожиданно остановился: {error}"))?
+}
+
+fn resolve_file_reference_native(
+    reference: String,
+    directory_only: bool,
+) -> Result<String, String> {
+    let reference = validate_file_search_query(&reference)?;
+    if let Some(path) = standard_directory(&reference) {
+        let path = ensure_path_in_home(&path, true)?;
+        return Ok(path.display().to_string());
+    }
+    let direct = PathBuf::from(&reference);
+    if direct.is_absolute() {
+        let path = ensure_path_in_home(&direct, true)?;
+        if directory_only && !path.is_dir() {
+            return Err("Указанный путь не является папкой".to_string());
+        }
+        return Ok(path.display().to_string());
+    }
+
+    let home = user_home()?;
+    let mut matches = fallback_file_search(&home, &reference, 100)
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| !directory_only || path.is_dir())
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        let left_exact = left
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&reference));
+        let right_exact = right
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(&reference));
+        right_exact
+            .cmp(&left_exact)
+            .then_with(|| left.components().count().cmp(&right.components().count()))
+            .then_with(|| left.cmp(right))
+    });
+    let path = matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("Не найден путь по имени «{reference}»"))?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn resolve_file_reference(
+    reference: String,
+    directory_only: bool,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_file_reference_native(reference, directory_only)
+    })
+    .await
+    .map_err(|error| format!("Поиск пути неожиданно остановился: {error}"))?
+}
+
+fn read_text_file_native(path: String) -> Result<FileContentReport, String> {
+    const MAX_FILE_BYTES: u64 = 2_000_000;
+    const MAX_CONTENT_CHARS: usize = 24_000;
+    const TEXT_EXTENSIONS: [&str; 28] = [
+        "txt", "md", "json", "csv", "log", "rs", "toml", "ts", "tsx", "js", "jsx", "vue", "css",
+        "html", "htm", "py", "php", "sql", "yaml", "yml", "xml", "sh", "zsh", "java", "kt",
+        "swift", "c", "cpp",
+    ];
+    let path = ensure_path_in_home(Path::new(path.trim()), true)?;
+    if !path.is_file() {
+        return Err("Указанный путь не является файлом".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if !TEXT_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(format!(
+            "Формат .{extension} пока нельзя безопасно прочитать как текст"
+        ));
+    }
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err("Файл больше 2 МБ. Для анализа выберите меньший файл".to_string());
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("Не удалось прочитать файл: {error}"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "Файл не является текстом UTF-8".to_string())?
+        .replace('\0', "");
+    let content = text.chars().take(MAX_CONTENT_CHARS).collect::<String>();
+    let truncated = text.chars().count() > MAX_CONTENT_CHARS;
+    audit_action(
+        "file-read",
+        "low",
+        "completed",
+        serde_json::json!({ "file": path.file_name(), "bytes": metadata.len(), "truncated": truncated }),
+    );
+    Ok(FileContentReport {
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        path: path.display().to_string(),
+        size_bytes: metadata.len(),
+        content,
+        truncated,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn read_text_file(path: String) -> Result<FileContentReport, String> {
+    tauri::async_runtime::spawn_blocking(move || read_text_file_native(path))
+        .await
+        .map_err(|error| format!("Чтение файла неожиданно остановилось: {error}"))?
+}
+
+fn move_file_native(
+    source: String,
+    destination_directory: String,
+) -> Result<FileActionResult, String> {
+    let source = ensure_path_in_home(Path::new(source.trim()), true)?;
+    let destination_directory = ensure_path_in_home(Path::new(destination_directory.trim()), true)?;
+    if !destination_directory.is_dir() {
+        return Err("Путь назначения не является папкой".to_string());
+    }
+    if source.is_dir() && destination_directory.starts_with(&source) {
+        return Err("Нельзя переместить папку внутрь самой себя".to_string());
+    }
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "Нельзя переместить корневую папку".to_string())?;
+    let destination = destination_directory.join(file_name);
+    ensure_path_in_home(&destination, false)?;
+    if destination.exists() {
+        return Err("В папке назначения уже существует объект с таким именем".to_string());
+    }
+    fs::rename(&source, &destination)
+        .map_err(|error| format!("Не удалось переместить файл или папку: {error}"))?;
+    let undo = FileMoveUndo {
+        from: destination.display().to_string(),
+        to: source.display().to_string(),
+    };
+    audit_action(
+        "file-move",
+        "medium",
+        "completed",
+        serde_json::json!({ "from": source, "to": destination }),
+    );
+    Ok(FileActionResult {
+        success: true,
+        message: format!(
+            "«{}» перемещён в «{}».",
+            file_name.to_string_lossy(),
+            destination_directory.display()
+        ),
+        undo_kind: Some("file-move".to_string()),
+        undo_token: Some(serde_json::to_string(&undo).map_err(|error| error.to_string())?),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn move_file(
+    source: String,
+    destination_directory: String,
+) -> Result<FileActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || move_file_native(source, destination_directory))
+        .await
+        .map_err(|error| format!("Перемещение неожиданно остановилось: {error}"))?
+}
+
+fn validate_file_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.chars().count() > 255
+        || name
+            .chars()
+            .any(|character| character.is_control() || character == '/' || character == '\\')
+    {
+        return Err("Некорректное новое имя файла или папки".to_string());
+    }
+    Ok(name.to_string())
+}
+
+fn rename_file_native(source: String, new_name: String) -> Result<FileActionResult, String> {
+    let source = ensure_path_in_home(Path::new(source.trim()), true)?;
+    let new_name = validate_file_name(&new_name)?;
+    let destination = source
+        .parent()
+        .ok_or_else(|| "Нельзя переименовать корневую папку".to_string())?
+        .join(&new_name);
+    ensure_path_in_home(&destination, false)?;
+    if destination.exists() {
+        return Err("Объект с новым именем уже существует".to_string());
+    }
+    let previous_name = source
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    fs::rename(&source, &destination)
+        .map_err(|error| format!("Не удалось переименовать файл или папку: {error}"))?;
+    let undo = FileMoveUndo {
+        from: destination.display().to_string(),
+        to: source.display().to_string(),
+    };
+    audit_action(
+        "file-rename",
+        "medium",
+        "completed",
+        serde_json::json!({ "from": source, "to": destination }),
+    );
+    Ok(FileActionResult {
+        success: true,
+        message: format!("«{previous_name}» переименован в «{new_name}»."),
+        undo_kind: Some("file-move".to_string()),
+        undo_token: Some(serde_json::to_string(&undo).map_err(|error| error.to_string())?),
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn rename_file(
+    source: String,
+    new_name: String,
+) -> Result<FileActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || rename_file_native(source, new_name))
+        .await
+        .map_err(|error| format!("Переименование неожиданно остановилось: {error}"))?
+}
+
+fn undo_file_action_native(token: String) -> Result<FileActionResult, String> {
+    let undo: FileMoveUndo =
+        serde_json::from_str(&token).map_err(|_| "Повреждена запись отмены".to_string())?;
+    let from = ensure_path_in_home(Path::new(&undo.from), true)?;
+    let to = ensure_path_in_home(Path::new(&undo.to), false)?;
+    if to.exists() {
+        return Err("Исходный путь уже занят — автоматическая отмена остановлена".to_string());
+    }
+    fs::rename(&from, &to).map_err(|error| format!("Не удалось отменить перемещение: {error}"))?;
+    audit_action(
+        "undo-file-move",
+        "low",
+        "completed",
+        serde_json::json!({ "from": from, "to": to }),
+    );
+    Ok(FileActionResult {
+        success: true,
+        message: "Последнее перемещение отменено.".to_string(),
+        undo_kind: None,
+        undo_token: None,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn undo_file_action(token: String) -> Result<FileActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || undo_file_action_native(token))
+        .await
+        .map_err(|error| format!("Отмена неожиданно остановилась: {error}"))?
 }
 
 fn normalize(value: &str) -> String {
@@ -1095,5 +1424,40 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].ends_with("Quarterly Report.txt"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reads_moves_and_undoes_a_text_file() {
+        let home = user_home().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("c3po-file-actions-")
+            .tempdir_in(home)
+            .unwrap();
+        let destination = root.path().join("Archive");
+        fs::create_dir(&destination).unwrap();
+        let source = root.path().join("notes.txt");
+        fs::write(&source, "Локальный тест").unwrap();
+
+        let report = read_text_file_native(source.display().to_string()).unwrap();
+        assert_eq!(report.content, "Локальный тест");
+
+        let moved = move_file_native(
+            source.display().to_string(),
+            destination.display().to_string(),
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert!(destination.join("notes.txt").exists());
+
+        undo_file_action_native(moved.undo_token.unwrap()).unwrap();
+        assert!(source.exists());
+        assert!(!destination.join("notes.txt").exists());
+
+        let renamed =
+            rename_file_native(source.display().to_string(), "ideas.md".to_string()).unwrap();
+        assert!(!source.exists());
+        assert!(root.path().join("ideas.md").exists());
+        undo_file_action_native(renamed.undo_token.unwrap()).unwrap();
+        assert!(source.exists());
     }
 }

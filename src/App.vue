@@ -9,6 +9,7 @@ import {
 import droidPortrait from "./assets/protocol-droid.png";
 import { assistantPhrase, moviePhrase } from "./assistantPhrases";
 import { isLanguageCode, languages, translations, type LanguageCode } from "./i18n";
+import { classifyQuickStartCommand, quickStartItems, type QuickStartItem } from "./quickStart";
 
 type Message = {
   id: number;
@@ -2854,6 +2855,48 @@ function saveCommandLanguage() {
   selectedVoiceName.value = selectedCommandLanguage.value.nativeName;
 }
 
+async function runQuickStart(item: QuickStartItem) {
+  const action = item.action;
+  if (action.kind === "system-info") {
+    proposeSystemInfo();
+    return;
+  }
+  if (action.kind === "chat") {
+    conversationListOpen.value = false;
+    chatOpen.value = true;
+    return;
+  }
+  if (action.kind === "models") {
+    llmOpen.value = true;
+    return;
+  }
+  if (action.kind === "permissions") {
+    await openPermissions();
+    return;
+  }
+  if (action.kind === "voice-test") {
+    await testVoice();
+    return;
+  }
+  if (action.kind === "template") {
+    conversationListOpen.value = false;
+    chatOpen.value = true;
+    input.value = action.template;
+    lastCommand.value = "Шаблон добавлен в диалог. Замените пример своими данными и отправьте команду.";
+    return;
+  }
+  const detectedRoute = classifyQuickStartCommand(action.command);
+  if (detectedRoute !== action.expectedRoute) {
+    await writeLog("error", "quick-start.route", "Команда быстрого старта не прошла внутреннюю проверку", {
+      id: item.id,
+      expected: action.expectedRoute,
+      detected: detectedRoute,
+    });
+    return;
+  }
+  processVoiceCommand(action.command);
+}
+
 onMounted(async () => {
   saveInterfaceLanguage();
   saveCommandLanguage();
@@ -3023,53 +3066,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="command-grid">
-          <button type="button" @click="proposeSystemInfo">
-            <span class="command-icon">⌘</span>
+          <button v-for="item in quickStartItems" :key="item.id" type="button" @click="runQuickStart(item)">
+            <span class="command-icon">{{ item.icon }}</span>
             <span>
-              <strong>«{{ t("systemCommand") }}»</strong>
-              <small>{{ t("systemDescription") }}</small>
+              <strong>«{{ item.label }}»</strong>
+              <small>{{ item.id === "voice-test" ? `${selectedVoiceName} · ${item.description}` : item.description }}</small>
             </span>
-            <b>→</b>
-          </button>
-          <button type="button" @click="chatOpen = true">
-            <span class="command-icon">◇</span>
-            <span>
-              <strong>«{{ t("chatCommand") }}»</strong>
-              <small>{{ t("chatDescription") }}</small>
-            </span>
-            <b>→</b>
-          </button>
-          <button type="button" @click="processVoiceCommand('Открой Telegram')">
-            <span class="command-icon">✈</span>
-            <span>
-              <strong>«Открой Telegram»</strong>
-              <small>Сообщения отправляются только после подтверждения</small>
-            </span>
-            <b>→</b>
-          </button>
-          <button type="button" @click="processVoiceCommand('Проанализируй почту и расставь приоритеты')">
-            <span class="command-icon">✉</span>
-            <span>
-              <strong>«Проанализируй почту»</strong>
-              <small>Приоритеты и рекомендации по последним письмам</small>
-            </span>
-            <b>→</b>
-          </button>
-          <button type="button" @click="processVoiceCommand('Проанализируй календарь и мою загруженность на неделю')">
-            <span class="command-icon">▦</span>
-            <span>
-              <strong>«Проанализируй календарь»</strong>
-              <small>Встречи, пересечения и свободные окна</small>
-            </span>
-            <b>→</b>
-          </button>
-          <button type="button" @click="testVoice">
-            <span class="command-icon">♫</span>
-            <span>
-              <strong>{{ t("testVoice") }}</strong>
-              <small>{{ selectedVoiceName }} · {{ t("voiceDescription") }}</small>
-            </span>
-            <b>▶</b>
+            <b>{{ item.action.kind === "voice-test" ? "▶" : (item.action.kind === "template" ? "✎" : "→") }}</b>
           </button>
         </div>
       </section>

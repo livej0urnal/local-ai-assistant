@@ -1,6 +1,6 @@
 [package]
 name = "local-ai-assistant"
-version = "0.1.3"
+version = "0.1.4"
 description = "A safe local AI assistant for macOS and Windows"
 authors = ["Igor Filippov"]
 edition = "2024"

@@ -408,7 +408,14 @@ fn ensure_patch_targets_clean(root: &Path, files: &[String]) -> Result<(), Strin
 
 fn git_apply(root: &Path, patch: &str, check: bool, reverse: bool) -> Result<(), String> {
     let mut command = Command::new("git");
-    command.arg("-C").arg(root).arg("apply");
+    // Git for Windows often enables core.autocrlf globally. A transactional
+    // patch must not silently rewrite every LF to CRLF: otherwise even a
+    // successful reverse patch would not restore the original bytes.
+    command
+        .args(["-c", "core.autocrlf=false"])
+        .arg("-C")
+        .arg(root)
+        .arg("apply");
     if check {
         command.arg("--check");
     }
@@ -765,6 +772,17 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        // Воспроизводим типичную настройку Git for Windows. Сам исполнитель
+        // обязан переопределить её и сохранить исходные окончания строк.
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(["config", "core.autocrlf", "true"])
+                .status()
+                .unwrap()
+                .success()
+        );
         fs::create_dir(root.path().join("src")).unwrap();
         fs::write(
             root.path().join("Cargo.toml"),
@@ -831,6 +849,15 @@ mod tests {
             Command::new("git")
                 .arg("init")
                 .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(["config", "core.autocrlf", "true"])
                 .status()
                 .unwrap()
                 .success()

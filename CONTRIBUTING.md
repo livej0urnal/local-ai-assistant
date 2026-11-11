@@ -6,15 +6,17 @@
 
 1. Сделайте fork репозитория.
 2. Создайте ветку от актуальной основной ветки.
-3. Установите зависимости командой `npm install`.
-4. Запустите приложение через `npm run tauri dev`.
+3. Установите зафиксированные зависимости командой `npm ci`.
+4. Запустите приложение через `npm run desktop`.
 
 ## Перед pull request
 
 ```bash
 npm run build
-cargo fmt --check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml
+npm test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
 ```
 
 Добавляйте тесты для новой логики Rust. Изменения системных разрешений, файловых операций и

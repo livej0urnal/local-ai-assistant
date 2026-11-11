@@ -58,10 +58,19 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "C-3PO ${{ github.ref_name }}"
           releaseBody: |
-            C-3PO for macOS Apple Silicon, macOS Intel and Windows x64.
+            C-3PO Local Assistant for macOS Apple Silicon, macOS Intel and Windows x64.
+
+            Highlights:
+            - local R2-D2, BB-8, K-2SO and BD-1 model routing;
+            - voice and text conversations with background wake-up;
+            - system, file, code, mail, calendar and screen analysis;
+            - scheduled tasks with progress and system notifications;
+            - confirmation and rollback for supported changing actions.
+
             The installer includes the llama.cpp runtime. On first launch, the model panel can download
-            the official R2-D2, BB-8 and K-2SO GGUF pack after explicit confirmation (~5.7 GB).
-            Personal voice samples and personal data are never included.
+            the official recommended GGUF pack after explicit confirmation (~8.5 GB). Models can also be
+            installed individually. Personal voice samples, conversation history and personal data are
+            never included in release assets.
           releaseDraft: false
           prerelease: false
           args: "--target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json"

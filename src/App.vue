@@ -370,18 +370,28 @@ function introductionPrompt(language: LanguageCode) {
 
 function readConversationThreads(profileId: string): ConversationThread[] {
   try {
-    const value = JSON.parse(window.localStorage.getItem(`c3po.conversations.${profileId}`) ?? "[]");
-    if (Array.isArray(value) && value.length) return value as ConversationThread[];
+    const storageKey = `c3po.conversations.${profileId}`;
+    const storedValue = window.localStorage.getItem(storageKey);
+    if (storedValue !== null) {
+      const value = JSON.parse(storedValue);
+      // Пустой массив тоже является сохранённым состоянием. Иначе после
+      // очистки старая история мигрировала бы повторно из legacy-ключа.
+      if (Array.isArray(value)) return value as ConversationThread[];
+    }
 
     // Однократная миграция истории из первой версии, где у профиля был один чат.
-    const legacy = JSON.parse(window.localStorage.getItem(`c3po.conversation.${profileId}`) ?? "[]") as Message[];
+    const legacyKey = `c3po.conversation.${profileId}`;
+    const legacy = JSON.parse(window.localStorage.getItem(legacyKey) ?? "[]") as Message[];
     if (!Array.isArray(legacy) || !legacy.length) return [];
-    return [{
+    const migrated = [{
       id: crypto.randomUUID(),
       title: legacy.find((message) => message.role === "user")?.text.slice(0, 42) || t("dialogTitle"),
       updatedAt: new Date().toISOString(),
       messages: legacy,
     }];
+    window.localStorage.setItem(storageKey, JSON.stringify(migrated));
+    window.localStorage.removeItem(legacyKey);
+    return migrated;
   } catch {
     return [];
   }
@@ -540,19 +550,34 @@ function showMostRecentConversation() {
   nextMessageId.value = Math.max(1, ...messages.value.map((message) => message.id)) + 1;
 }
 
-function deleteConversation(thread: ConversationThread) {
-  if (!window.confirm(`${dialogLabels[interfaceLanguage.value].deleteDialog}: «${thread.title}»?`)) return;
-  conversationThreads.value = conversationThreads.value.filter((item) => item.id !== thread.id);
-  if (activeConversationId.value === thread.id) showMostRecentConversation();
-  persistConversationThreads();
+type ConversationDeleteRequest =
+  | { scope: "one"; threadId: string; title: string }
+  | { scope: "all" };
+
+const conversationDeleteRequest = ref<ConversationDeleteRequest | null>(null);
+
+function requestDeleteConversation(thread: ConversationThread) {
+  conversationDeleteRequest.value = { scope: "one", threadId: thread.id, title: thread.title };
 }
 
-function clearAllConversations() {
-  if (!conversationThreads.value.length) return;
-  if (!window.confirm(`${dialogLabels[interfaceLanguage.value].clear}?`)) return;
-  conversationThreads.value = [];
-  showMostRecentConversation();
+function requestClearAllConversations() {
+  if (conversationThreads.value.length) conversationDeleteRequest.value = { scope: "all" };
+}
+
+function confirmConversationDeletion() {
+  const request = conversationDeleteRequest.value;
+  if (!request) return;
+  if (request.scope === "all") {
+    conversationThreads.value = [];
+  } else {
+    conversationThreads.value = conversationThreads.value.filter((item) => item.id !== request.threadId);
+  }
+  if (request.scope === "all" || activeConversationId.value === request.threadId) showMostRecentConversation();
+  if (currentProfileId.value) {
+    window.localStorage.removeItem(`c3po.conversation.${currentProfileId.value}`);
+  }
   persistConversationThreads();
+  conversationDeleteRequest.value = null;
 }
 
 function formatConversationDate(value: string) {
@@ -3106,7 +3131,7 @@ onBeforeUnmount(() => {
                 v-if="conversationThreads.length"
                 class="clear-conversations"
                 type="button"
-                @click="clearAllConversations"
+                @click.stop="requestClearAllConversations"
               >{{ dialogLabels[interfaceLanguage].clear }}</button>
               <button type="button" @click="startNewConversation">＋ {{ dialogLabels[interfaceLanguage].newDialog }}</button>
             </div>
@@ -3130,9 +3155,23 @@ onBeforeUnmount(() => {
               type="button"
               :aria-label="dialogLabels[interfaceLanguage].deleteDialog"
               :title="dialogLabels[interfaceLanguage].deleteDialog"
-              @click="deleteConversation(thread)"
+              @click.stop="requestDeleteConversation(thread)"
             >×</button>
           </article>
+          <div v-if="conversationDeleteRequest" class="conversation-delete-confirm" role="alertdialog" aria-modal="true">
+            <strong>
+              {{ conversationDeleteRequest.scope === "all"
+                ? `${dialogLabels[interfaceLanguage].clear}?`
+                : `${dialogLabels[interfaceLanguage].deleteDialog}: «${conversationDeleteRequest.title}»?` }}
+            </strong>
+            <small>Это действие удалит локальную историю и не затронет файлы или приложения.</small>
+            <div>
+              <button type="button" @click.stop="conversationDeleteRequest = null">Отмена</button>
+              <button class="danger-button" type="button" @click.stop="confirmConversationDeletion">
+                {{ conversationDeleteRequest.scope === "all" ? dialogLabels[interfaceLanguage].clear : dialogLabels[interfaceLanguage].deleteDialog }}
+              </button>
+            </div>
+          </div>
         </section>
 
         <div v-else ref="conversation" class="drawer-messages">

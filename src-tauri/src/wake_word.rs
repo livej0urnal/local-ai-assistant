@@ -60,17 +60,37 @@ fn contains_wake_phrase(text: &str) -> bool {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    // Apple Speech может записать одно и то же имя слитно, раздельно,
+    // цифрой или фонетически. Компактная форма покрывает эти варианты без
+    // привязки к знакам препинания и дефисам.
+    let compact = normalized.replace(' ', "");
     [
         "c 3 p o",
         "c 3po",
         "c3po",
+        "c 3 pio",
         "си три пи о",
         "с три пи о",
+        "с 3 пи о",
+        "с 3 пио",
+        "с три пио",
+        "с три по",
         "с 3 по",
         "ситрипио",
     ]
     .iter()
     .any(|phrase| normalized.contains(phrase))
+        || [
+            "c3po",
+            "c3pio",
+            "с3по",
+            "с3пио",
+            "ситрипио",
+            "стрипио",
+            "ситрипо",
+        ]
+        .iter()
+        .any(|phrase| compact.contains(phrase))
 }
 
 fn restart_later(app: AppHandle, seconds: u64) {
@@ -110,8 +130,10 @@ fn start_session(app: AppHandle) -> Result<(), String> {
     unsafe { request.setContextualStrings(&NSArray::from_retained_slice(&phrases)) };
 
     let triggered = Arc::new(AtomicBool::new(false));
+    let heard_speech = Arc::new(AtomicBool::new(false));
     let callback_app = app.clone();
     let callback_triggered = Arc::clone(&triggered);
+    let callback_heard_speech = Arc::clone(&heard_speech);
     let result_block: ResultBlock = RcBlock::new(
         move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
             if !error.is_null() || result.is_null() {
@@ -119,6 +141,15 @@ fn start_session(app: AppHandle) -> Result<(), String> {
             }
             // SAFETY: result действителен на протяжении вызова блока Apple.
             let text = unsafe { (&*result).bestTranscription().formattedString().to_string() };
+            if !text.trim().is_empty() && !callback_heard_speech.swap(true, Ordering::SeqCst) {
+                // Текст команды намеренно не пишется в журнал: фиксируем лишь
+                // сам факт, что системный микрофон и Apple Speech услышали речь.
+                append_native_log(
+                    "info",
+                    "voice.native-speech",
+                    "Речь услышана локальным распознавателем",
+                );
+            }
             let _ = callback_app.emit("native-speech-transcript", text.clone());
             if !contains_wake_phrase(&text) || callback_triggered.swap(true, Ordering::SeqCst) {
                 return;
@@ -252,6 +283,8 @@ mod tests {
     fn recognises_supported_wake_phrases() {
         assert!(contains_wake_phrase("Привет, C-3PO"));
         assert!(contains_wake_phrase("си три пи о"));
+        assert!(contains_wake_phrase("привет с три пио"));
+        assert!(contains_wake_phrase("с 3 пи о"));
         assert!(contains_wake_phrase("с 3 по"));
         assert!(!contains_wake_phrase("обычный разговор"));
     }

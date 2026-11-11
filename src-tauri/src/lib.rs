@@ -432,6 +432,7 @@ pub fn run() {
             executor::open_automation_settings,
             executor::type_text_in_application,
             executor::search_in_browser,
+            executor::search_files,
             executor::get_action_log_path,
             executor::record_action_decision,
             executor::get_current_weather,

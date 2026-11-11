@@ -201,6 +201,13 @@ type WeatherReport = {
   summary: string;
 };
 
+type FileSearchReport = {
+  query: string;
+  scope: string;
+  paths: string[];
+  truncated: boolean;
+};
+
 type MailOverview = {
   source: string;
   unread: number;
@@ -2506,6 +2513,58 @@ async function answerWeatherQuestion(question: string, notifyInBackground: boole
   }
 }
 
+function parseFileSearchCommand(text: string): string | null {
+  const match = text.match(/^(?:найди|найти|поищи|отыщи|где\s+(?:находится|лежит)|find|search\s+for)\s+(?:(?:файл|файлы|папку|папка|документ|document|file|folder)\s*)?(.*)$/iu);
+  return match ? match[1].trim().replace(/^[«"']|[»"']$/gu, "") : null;
+}
+
+async function answerFileSearch(query: string, notifyInBackground: boolean) {
+  if (!query) {
+    const response = "Назовите хотя бы часть имени файла или папки. Например: «Найди файл budget.xlsx».";
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    return;
+  }
+  if (!("__TAURI_INTERNALS__" in window)) {
+    const response = "Поиск по компьютеру доступен в настольном приложении C-3PO, а не в браузерном предпросмотре.";
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    return;
+  }
+  isWorking.value = true;
+  voiceState.value = "thinking";
+  lastCommand.value = `Ищу «${query}» на этом компьютере…`;
+  try {
+    const report = await invoke<FileSearchReport>("search_files", { query, limit: 20 });
+    const response = report.paths.length
+      ? [
+          `Нашёл ${report.paths.length}${report.truncated ? "+" : ""} совпадений по имени «${report.query}»:`,
+          ...report.paths.map((path, index) => `${index + 1}. ${path}`),
+        ].join("\n")
+      : `В домашней папке не найдено файлов или папок с именем «${report.query}».`;
+    addMessage("assistant", response);
+    lastCommand.value = report.paths.length
+      ? `Нашёл ${report.paths.length}${report.truncated ? " или больше" : ""} совпадений. Пути показаны в диалоге.`
+      : response;
+    speak(lastCommand.value);
+    if (notifyInBackground) void notifyFromBackground(lastCommand.value);
+    await writeLog("info", "tool.file-search", "Локальный поиск файлов завершён", {
+      results: report.paths.length,
+      truncated: report.truncated,
+    });
+  } catch (error) {
+    const response = `Не удалось выполнить локальный поиск: ${errorDetails(error).message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    await writeLog("error", "tool.file-search", response);
+  } finally {
+    isWorking.value = false;
+    voiceState.value = microphoneActive.value ? "listening" : "idle";
+  }
+}
+
 function parseEmailDraftCommand(text: string) {
   const match = text.match(/^(?:напиши|подготовь|создай)\s+(?:черновик\s+)?письм[оа]\s+(?:на\s+адрес\s+|для\s+|на\s+)?([^\s,;]+@[^\s,;]+)\s+(?:с\s+темой|тема)\s+(.+?)\s+(?:текст|сообщение)\s+([\s\S]+)$/iu);
   if (!match) return null;
@@ -2728,6 +2787,11 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   }
   if (pendingAction.value && /(отмен|нет|стоп)/.test(normalized)) {
     cancelAction();
+    return;
+  }
+  const fileSearchQuery = parseFileSearchCommand(text);
+  if (fileSearchQuery !== null) {
+    void answerFileSearch(fileSearchQuery, notifyInBackground);
     return;
   }
   const emailDraft = parseEmailDraftCommand(text);

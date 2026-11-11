@@ -3,7 +3,7 @@ import test from "node:test";
 import { classifyQuickStartCommand, quickStartItems } from "../src/quickStart.ts";
 
 test("каждая функция быстрого старта имеет уникальный идентификатор и понятное описание", () => {
-  assert.equal(quickStartItems.length, 14);
+  assert.equal(quickStartItems.length, 15);
   assert.equal(new Set(quickStartItems.map((item) => item.id)).size, quickStartItems.length);
   for (const item of quickStartItems) {
     assert.ok(item.label.trim().length >= 4, `${item.id}: отсутствует название`);

@@ -92,6 +92,147 @@ pub(crate) struct WeatherReport {
     summary: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileSearchReport {
+    query: String,
+    scope: String,
+    paths: Vec<String>,
+    truncated: bool,
+}
+
+fn validate_file_search_query(value: &str) -> Result<String, String> {
+    let query = value.trim();
+    if query.is_empty() || query.chars().count() > 160 || query.chars().any(char::is_control) {
+        return Err("Укажите часть имени файла или папки длиной до 160 символов".to_string());
+    }
+    Ok(query.to_string())
+}
+
+fn fallback_file_search(home: &Path, query: &str, result_limit: usize) -> Vec<String> {
+    let needle = query.to_lowercase();
+    let mut stack = vec![home.to_path_buf()];
+    let mut results = Vec::new();
+    let mut visited = 0usize;
+    const VISIT_LIMIT: usize = 80_000;
+    const SKIPPED_DIRECTORIES: [&str; 7] = [
+        "Library",
+        ".git",
+        "node_modules",
+        "target",
+        "dist",
+        ".Trash",
+        ".cache",
+    ];
+
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > VISIT_LIMIT || results.len() >= result_limit {
+                return results;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.to_lowercase().contains(&needle) {
+                results.push(path.display().to_string());
+                if results.len() >= result_limit {
+                    return results;
+                }
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir()
+                && !file_type.is_symlink()
+                && !SKIPPED_DIRECTORIES.contains(&name.as_str())
+            {
+                stack.push(path);
+            }
+        }
+    }
+    results
+}
+
+fn search_files_native(query: String, limit: Option<usize>) -> Result<FileSearchReport, String> {
+    let query = validate_file_search_query(&query)?;
+    let limit = limit.unwrap_or(20).clamp(1, 50);
+    let home = directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .ok_or_else(|| "Не удалось определить домашнюю папку пользователя".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    let mut paths = {
+        // `mdfind -name` ищет по имени в системном индексе Spotlight. Значение
+        // передаётся отдельным аргументом и никогда не исполняется как shell-код.
+        let output = Command::new("/usr/bin/mdfind")
+            .arg("-onlyin")
+            .arg(&home)
+            .arg("-name")
+            .arg(&query)
+            .output()
+            .map_err(|error| format!("Не удалось запустить локальный поиск: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|path| !path.trim().is_empty())
+            .take(limit + 1)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    #[cfg(target_os = "macos")]
+    if paths.is_empty() {
+        paths = fallback_file_search(&home, &query, limit + 1);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let paths: Vec<String> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    if paths.is_empty() {
+        return Err(
+            "Поиск через Windows Search будет добавлен отдельным нативным адаптером".to_string(),
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if paths.is_empty() {
+        return Err("Системный поиск файлов на этой платформе пока не поддерживается".to_string());
+    }
+
+    let truncated = paths.len() > limit;
+    let paths = paths.into_iter().take(limit).collect::<Vec<_>>();
+    audit_action(
+        "file-search",
+        "low",
+        "completed",
+        serde_json::json!({ "results": paths.len(), "truncated": truncated }),
+    );
+    Ok(FileSearchReport {
+        query,
+        scope: home.display().to_string(),
+        paths,
+        truncated,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn search_files(
+    query: String,
+    limit: Option<usize>,
+) -> Result<FileSearchReport, String> {
+    // Прямой обход диска может занять заметное время, поэтому он не должен
+    // блокировать окно, анимацию R2-D2 и кнопку остановки голосового ответа.
+    tauri::async_runtime::spawn_blocking(move || search_files_native(query, limit))
+        .await
+        .map_err(|error| format!("Локальный поиск неожиданно остановился: {error}"))?
+}
+
 fn normalize(value: &str) -> String {
     value
         .trim()
@@ -931,5 +1072,28 @@ mod tests {
         assert!(validate_action_decision("shell", "low", "approved").is_err());
         assert!(validate_action_decision("system-info", "unknown", "approved").is_err());
         assert!(validate_action_decision("system-info", "low", "rewritten").is_err());
+    }
+
+    #[test]
+    fn validates_local_file_search_queries() {
+        assert_eq!(
+            validate_file_search_query(" README.md ").unwrap(),
+            "README.md"
+        );
+        assert!(validate_file_search_query("").is_err());
+        assert!(validate_file_search_query("bad\nquery").is_err());
+        assert!(validate_file_search_query(&"x".repeat(161)).is_err());
+    }
+
+    #[test]
+    fn fallback_search_finds_files_without_an_index() {
+        let root = std::env::temp_dir().join(format!("c3po-file-search-{}", std::process::id()));
+        let nested = root.join("Documents");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("Quarterly Report.txt"), "test").unwrap();
+        let results = fallback_file_search(&root, "quarterly", 5);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ends_with("Quarterly Report.txt"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

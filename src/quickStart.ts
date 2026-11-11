@@ -3,6 +3,7 @@ export type QuickStartRoute =
   | "calculation"
   | "browser-search"
   | "application-open"
+  | "file-search"
   | "mail-analysis"
   | "calendar-analysis";
 
@@ -69,6 +70,13 @@ export const quickStartItems: readonly QuickStartItem[] = [
     label: "Открой калькулятор",
     description: "Запуск установленного приложения",
     action: { kind: "command", command: "Открой калькулятор", expectedRoute: "application-open" },
+  },
+  {
+    id: "file-search",
+    icon: "⌕",
+    label: "Найди файл README.md",
+    description: "Локальный поиск по имени на компьютере",
+    action: { kind: "command", command: "Найди файл README.md", expectedRoute: "file-search" },
   },
   {
     id: "telegram",
@@ -149,6 +157,7 @@ export function classifyQuickStartCommand(command: string): QuickStartRoute | nu
   if (/^(?:открой|запусти|open|launch)(?:\s|$)/u.test(normalized) && /(?:^|\s)(?:найди|поищи|search)(?:\s|$)/u.test(normalized)) {
     return "browser-search";
   }
+  if (/^(?:найди|найти|поищи|отыщи|find|search\s+for)(?:\s|$)/u.test(normalized)) return "file-search";
   if (/(проанализ|разбер|сортир|приоритет|важн|непрочитан).*(почт|письм|email|inbox)/u.test(normalized)) {
     return "mail-analysis";
   }

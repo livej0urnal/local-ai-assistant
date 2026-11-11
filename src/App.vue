@@ -740,6 +740,7 @@ const microphonePermission = ref<PermissionState>("checking");
 const microphoneDevices = ref(0);
 const microphoneOptions = ref<MicrophoneOption[]>([]);
 const selectedMicrophoneId = ref(window.localStorage.getItem("c3po.microphone-device") || "default");
+const weatherLocation = ref(window.localStorage.getItem("c3po.weather-location") || "");
 const microphoneActive = ref(false);
 const recognitionAvailable = ref(false);
 const synthesisAvailable = ref(false);
@@ -1473,7 +1474,7 @@ function deleteScheduledTask(task: ScheduledTask) {
 async function scheduledTaskToolContext(task: ScheduledTask): Promise<string | null> {
   const normalized = task.prompt.toLowerCase();
   if (/(погод|weather)/iu.test(normalized)) {
-    const report = await invoke<WeatherReport>("get_current_weather");
+    const report = await invoke<WeatherReport>("get_current_weather", { location: currentWeatherLocation() });
     return `Источник: ${report.source}. Актуальная сводка: ${report.summary}`;
   }
   if (/(почт|письм|email|inbox)/iu.test(normalized)) {
@@ -2799,7 +2800,7 @@ async function answerWeatherQuestion(question: string, notifyInBackground: boole
     if (!("__TAURI_INTERNALS__" in window)) {
       throw new Error("Фоновая погода доступна только в приложении C-3PO");
     }
-    const report = await invoke<WeatherReport>("get_current_weather");
+    const report = await invoke<WeatherReport>("get_current_weather", { location: currentWeatherLocation() });
     await writeLog("info", "tool.weather", "Получена актуальная сводка в фоновом режиме", {
       source: report.source,
       characters: report.summary.length,
@@ -3654,6 +3655,18 @@ function saveInterfaceLanguage() {
   }
 }
 
+function saveWeatherLocation() {
+  weatherLocation.value = weatherLocation.value.trim().slice(0, 120);
+  if (weatherLocation.value) window.localStorage.setItem("c3po.weather-location", weatherLocation.value);
+  else window.localStorage.removeItem("c3po.weather-location");
+}
+
+function currentWeatherLocation() {
+  const location = weatherLocation.value.trim();
+  if (!location) throw new Error("Укажите текущий город в настройках C-3PO");
+  return location;
+}
+
 function selectTheme(theme: ThemePreference) {
   themePreference.value = theme;
   applyTheme();
@@ -4217,6 +4230,15 @@ onBeforeUnmount(() => {
               </select>
             </label>
             <small class="settings-hint">Используется для уровня звука, прерывания речи и будущего локального распознавания.</small>
+          </section>
+
+          <section class="settings-section">
+            <span class="settings-section-title">Погода</span>
+            <label class="settings-select-field">
+              <span>Текущий город</span>
+              <input v-model="weatherLocation" maxlength="120" placeholder="Например, Подгорица" @change="saveWeatherLocation" />
+            </label>
+            <small class="settings-hint">C-3PO передаёт погодному сервису только указанный город и не определяет местоположение по IP.</small>
           </section>
 
           <button class="settings-toggle" type="button" :class="{ active: silentMode }" @click="toggleSilentMode">

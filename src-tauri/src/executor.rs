@@ -1305,7 +1305,7 @@ fn weather_report_from_payload(payload: &serde_json::Value) -> Result<WeatherRep
     }
 
     Ok(WeatherReport {
-        source: "wttr.in (местоположение определено по сети)".to_string(),
+        source: "wttr.in (город указан пользователем)".to_string(),
         summary: details.join(", "),
     })
 }

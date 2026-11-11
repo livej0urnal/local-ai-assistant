@@ -1069,7 +1069,8 @@ button:disabled {
   font-weight: 750;
 }
 
-.settings-select-field select {
+.settings-select-field select,
+.settings-select-field input {
   width: 100%;
   min-height: 42px;
   padding: 0 38px 0 12px;

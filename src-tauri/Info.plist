@@ -6,8 +6,6 @@
   <string>C-3PO использует микрофон, чтобы распознавать ваши голосовые команды.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>C-3PO преобразует голосовые команды в текст для выполнения разрешённых действий.</string>
-  <key>NSLocationWhenInUseUsageDescription</key>
-  <string>C-3PO использует текущее местоположение только для получения погоды в вашем городе.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>C-3PO по вашей команде читает локальные сводки Mail и Calendar, а изменяющие действия выполняет только после отдельного подтверждения.</string>
 </dict>

@@ -224,6 +224,7 @@ function readScheduledTasks(): ScheduledTask[] {
         && ["pending", "running", "waiting", "completed", "failed", "cancelled"].includes(item.status);
     }).slice(0, 200).map((item) => ({
       ...item,
+      status: item.status === "running" ? "pending" : item.status,
       progress: Number.isFinite(item.progress) ? Math.max(0, Math.min(100, item.progress)) : 0,
       result: typeof item.result === "string" ? item.result.slice(0, 4_000) : "",
     }));
@@ -897,6 +898,9 @@ const llmShortLabel = computed(() => {
   };
   return labels[llmStatus.value.state];
 });
+const activeScheduledTaskCount = computed(() => scheduledTasks.value.filter((task) =>
+  ["pending", "running", "waiting"].includes(task.status),
+).length);
 const droidModelDefinitions: Array<Omit<DroidModelProfile, "model">> = [
   { role: "general", droid: "R2-D2", purpose: "Общие вопросы и быстрые команды", recommendedModel: "Qwen2.5 1.5B" },
   { role: "code", droid: "BB-8", purpose: "Программирование и разбор ошибок", recommendedModel: "Qwen2.5 Coder 3B" },
@@ -1398,6 +1402,182 @@ async function analyzeCurrentScreen(question: string, notifyInBackground: boolea
     if (voiceState.value === "thinking") {
       voiceState.value = microphoneActive.value ? "listening" : "idle";
     }
+  }
+}
+
+function persistScheduledTasks() {
+  scheduledTasks.value.sort((left, right) => left.runAt.localeCompare(right.runAt));
+  window.localStorage.setItem("c3po.scheduled-tasks.v1", JSON.stringify(scheduledTasks.value.slice(-200)));
+}
+
+function formatScheduledDate(value: string) {
+  return new Intl.DateTimeFormat(interfaceLanguage.value, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function localDateTimeValue(value: string) {
+  const date = new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function updateScheduledDraftTime(event: Event) {
+  if (!scheduledTaskDraft.value) return;
+  const value = (event.target as HTMLInputElement).value;
+  const date = new Date(value);
+  if (Number.isFinite(date.getTime()) && date > new Date()) {
+    scheduledTaskDraft.value.runAt = date.toISOString();
+  }
+}
+
+function scheduledStatusLabel(status: ScheduledTaskStatus) {
+  const labels: Record<ScheduledTaskStatus, string> = {
+    pending: "ожидает",
+    running: "выполняется",
+    waiting: "нужно подтверждение",
+    completed: "завершена",
+    failed: "ошибка",
+    cancelled: "отменена",
+  };
+  return labels[status];
+}
+
+function confirmScheduledTask() {
+  const draft = scheduledTaskDraft.value;
+  if (!draft) return;
+  const now = new Date().toISOString();
+  scheduledTasks.value.push({
+    id: crypto.randomUUID(),
+    ...draft,
+    status: "pending",
+    progress: 0,
+    result: "",
+    createdAt: now,
+    updatedAt: now,
+    profileId: currentProfileId.value,
+  });
+  persistScheduledTasks();
+  scheduledTaskDraft.value = null;
+  const response = `Задача создана на ${formatScheduledDate(draft.runAt)}. Я сообщу о начале и результате.`;
+  addMessage("assistant", response);
+  lastCommand.value = response;
+  void ensureNotificationPermission();
+}
+
+function cancelScheduledTask(task: ScheduledTask) {
+  if (task.status === "running" || task.status === "completed") return;
+  task.status = "cancelled";
+  task.progress = 0;
+  task.updatedAt = new Date().toISOString();
+  persistScheduledTasks();
+}
+
+function deleteScheduledTask(task: ScheduledTask) {
+  if (!window.confirm(`Удалить задачу «${task.title}» из истории?`)) return;
+  scheduledTasks.value = scheduledTasks.value.filter((item) => item.id !== task.id);
+  persistScheduledTasks();
+}
+
+async function scheduledTaskToolContext(task: ScheduledTask): Promise<string | null> {
+  const normalized = task.prompt.toLowerCase();
+  if (/(погод|weather)/iu.test(normalized)) {
+    const report = await invoke<WeatherReport>("get_current_weather");
+    return `Источник: ${report.source}. Актуальная сводка: ${report.summary}`;
+  }
+  if (/(почт|письм|email|inbox)/iu.test(normalized)) {
+    const overview = await invoke<MailOverview>("get_mail_overview", { limit: 20 });
+    const messages = overview.messages.slice(0, 15).map((message, index) => [
+      `${index + 1}. ${message.sender}`,
+      message.subject,
+      message.receivedAt,
+      message.isRead ? "прочитано" : "не прочитано",
+      message.isFlagged ? "с флагом" : "",
+      message.preview,
+    ].filter(Boolean).join(" | ")).join("\n");
+    return `Локальная почта: непрочитанных ${overview.unread}, с флагом ${overview.flagged}.\n${messages}`;
+  }
+  if (/(календар|расписан|встреч|загруж)/iu.test(normalized)) {
+    const overview = await invoke<CalendarOverview>("get_calendar_overview", { days: 7 });
+    const events = overview.events.slice(0, 50).map((event, index) =>
+      `${index + 1}. ${event.title} | ${event.startAt} — ${event.endAt} | ${event.calendar}`,
+    ).join("\n");
+    return `Локальный календарь на ${overview.rangeDays} дней. Событий: ${overview.events.length}.\n${events}`;
+  }
+  return null;
+}
+
+async function runScheduledTask(task: ScheduledTask, manual = false) {
+  if (["running", "completed", "cancelled"].includes(task.status) && !manual) return;
+  if (task.kind === "approval") {
+    task.status = "waiting";
+    task.progress = 0;
+    task.result = "Для выполнения требуется подтверждение пользователя в окне C-3PO.";
+    task.updatedAt = new Date().toISOString();
+    persistScheduledTasks();
+    const notice = `Задача «${task.title}» ожидает подтверждения.`;
+    void notifyFromBackground(notice);
+    if (manual) {
+      tasksOpen.value = false;
+      if ("__TAURI_INTERNALS__" in window) void invoke("show_main_window");
+      processVoiceCommand(task.prompt, false);
+    }
+    return;
+  }
+
+  task.status = "running";
+  task.progress = 10;
+  task.result = "";
+  task.updatedAt = new Date().toISOString();
+  persistScheduledTasks();
+  void notifyFromBackground(`Начинаю задачу «${task.title}».`);
+  try {
+    let result = "";
+    if (task.kind === "reminder") {
+      result = `Напоминание: ${task.prompt}`;
+      task.progress = 100;
+    } else {
+      if (!llmRuntime.value?.ready && !(await startLocalModel())) {
+        throw new Error("локальная модель не запустилась");
+      }
+      task.progress = 35;
+      persistScheduledTasks();
+      const toolContext = await scheduledTaskToolContext(task);
+      task.progress = 60;
+      persistScheduledTasks();
+      result = await askLocalModel(task.prompt, false, toolContext, false);
+      if (!result) throw new Error("локальная модель не сформировала результат");
+      task.progress = 100;
+    }
+    task.status = "completed";
+    task.result = result.slice(0, 4_000);
+    task.updatedAt = new Date().toISOString();
+    persistScheduledTasks();
+    addMessage("assistant", `Отложенная задача «${task.title}» завершена.\n\n${result}`);
+    void notifyFromBackground(`Задача «${task.title}» завершена. ${result}`);
+    await writeLog("info", "scheduler.complete", "Отложенная задача завершена", { id: task.id, kind: task.kind });
+  } catch (error) {
+    task.status = "failed";
+    task.result = errorDetails(error).message;
+    task.updatedAt = new Date().toISOString();
+    persistScheduledTasks();
+    void notifyFromBackground(`Ошибка задачи «${task.title}»: ${task.result}`);
+    await writeLog("error", "scheduler.failed", task.result, { id: task.id, kind: task.kind });
+  }
+}
+
+async function runDueScheduledTasks() {
+  if (schedulerRunning.value || isWorking.value) return;
+  const due = scheduledTasks.value.filter((task) => task.status === "pending" && Date.parse(task.runAt) <= Date.now());
+  if (!due.length) return;
+  schedulerRunning.value = true;
+  try {
+    // Выполняем последовательно: router llama.cpp сам меняет нужного дроида,
+    // не загружая несколько тяжёлых моделей одновременно.
+    for (const task of due) await runScheduledTask(task);
+  } finally {
+    schedulerRunning.value = false;
   }
 }
 
@@ -2673,6 +2853,72 @@ function parseInternetSearchCommand(text: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
+function parseScheduledTaskCommand(text: string): ScheduledTaskDraft | null {
+  const normalized = text.trim();
+  if (!/(?:напомни|запланируй|поставь\s+задачу|сделай|выполни|проверь|проанализируй|найди|remind|schedule)/iu.test(normalized)) {
+    return null;
+  }
+
+  const now = new Date();
+  let runAt: Date | null = null;
+  const duration = normalized.match(/через\s+(\d{1,4})\s*(минут\w*|час\w*|д(?:ень|ня|ней)|дн\w*)/iu);
+  if (duration) {
+    const amount = Number(duration[1]);
+    const unit = duration[2].toLowerCase();
+    const milliseconds = /минут/u.test(unit)
+      ? amount * 60_000
+      : /час/u.test(unit)
+        ? amount * 3_600_000
+        : amount * 86_400_000;
+    runAt = new Date(now.getTime() + milliseconds);
+  }
+
+  const absolute = normalized.match(/\b(сегодня|завтра)\b(?:\s+в)?\s+(\d{1,2})(?::(\d{2}))?/iu);
+  if (!runAt && absolute) {
+    const hour = Number(absolute[2]);
+    const minute = Number(absolute[3] || 0);
+    if (hour > 23 || minute > 59) return null;
+    runAt = new Date(now);
+    runAt.setSeconds(0, 0);
+    runAt.setHours(hour, minute, 0, 0);
+    if (absolute[1].toLowerCase() === "завтра") runAt.setDate(runAt.getDate() + 1);
+    if (runAt <= now) return null;
+  }
+
+  if (!runAt && /\bпозже\b/iu.test(normalized)) {
+    runAt = new Date(now.getTime() + 3_600_000);
+  }
+  if (!runAt) return null;
+
+  const reminder = /(?:^|\s)напомни(?:\s+мне)?\b|\bremind\b/iu.test(normalized);
+  const prompt = normalized
+    .replace(duration?.[0] || /$^/u, " ")
+    .replace(absolute?.[0] || /$^/u, " ")
+    .replace(/\bпозже\b/giu, " ")
+    .replace(/^(?:c-?3po[,\s]*)?/iu, "")
+    .replace(/^(?:напомни(?:\s+мне)?|запланируй|поставь\s+задачу)\s*/iu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!prompt) return null;
+  const requiresApproval = /(?:отправ|удал|перемест|переимен|введи|напиши\s+(?:в|контакту)|создай\s+(?:письмо|событие))/iu.test(prompt);
+  return {
+    title: prompt.slice(0, 80),
+    prompt,
+    runAt: runAt.toISOString(),
+    kind: reminder ? "reminder" : requiresApproval ? "approval" : "assistant",
+  };
+}
+
+function proposeScheduledTask(draft: ScheduledTaskDraft) {
+  scheduledTaskDraft.value = draft;
+  tasksOpen.value = true;
+  const when = formatScheduledDate(draft.runAt);
+  const response = `Предлагаю создать отложенную задачу «${draft.title}» на ${when}. Проверьте её в менеджере задач и нажмите «Создать».`;
+  addMessage("assistant", response);
+  lastCommand.value = response;
+  speak(response);
+}
+
 async function answerInternetSearch(query: string, notifyInBackground: boolean) {
   try {
     if (!("__TAURI_INTERNALS__" in window)) throw new Error("Интернет-поиск доступен в настольной версии C-3PO");
@@ -3233,6 +3479,11 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
     cancelAction();
     return;
   }
+  const scheduledTask = parseScheduledTaskCommand(text);
+  if (scheduledTask) {
+    proposeScheduledTask(scheduledTask);
+    return;
+  }
   if (isScreenAnalysisCommand(text)) {
     void analyzeCurrentScreen(text, notifyInBackground);
     return;
@@ -3589,6 +3840,8 @@ onMounted(async () => {
   // Снимаем лёгкий замер каждые пять секунд. Базовое и пиковое значения
   // позволяют заметить устойчивый рост памяти во время долгой работы.
   memoryTimer = window.setInterval(refreshProcessMetrics, 5_000);
+  void runDueScheduledTasks();
+  schedulerTimer = window.setInterval(runDueScheduledTasks, 15_000);
   // Если macOS уже запомнила разрешение, сначала подключаем анализатор уровня
   // микрофона. Благодаря этому даже стартовое приветствие можно немедленно
   // прервать своей речью. Само распознавание на время фразы приостанавливается
@@ -3614,6 +3867,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   navigator.mediaDevices?.removeEventListener?.("devicechange", countMicrophones);
   window.clearInterval(memoryTimer);
+  window.clearInterval(schedulerTimer);
   pauseMicrophone();
   window.speechSynthesis?.cancel();
   audioContext?.close();
@@ -3648,6 +3902,11 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="header-actions">
+        <button class="ghost-button task-button" type="button" aria-label="Отложенные задачи" @click="tasksOpen = true">
+          <span class="button-icon">◷</span>
+          <span>Задачи</span>
+          <b v-if="activeScheduledTaskCount">{{ activeScheduledTaskCount }}</b>
+        </button>
         <button class="ghost-button model-button" type="button" :aria-label="llmShortLabel" @click="openLlmPanel">
           <span class="button-icon">◈</span>
           <span>{{ llmShortLabel }}</span>
@@ -3901,6 +4160,71 @@ onBeforeUnmount(() => {
       </aside>
     </div>
 
+    <div v-if="tasksOpen" class="modal-backdrop" @click.self="tasksOpen = false">
+      <section class="permission-modal task-modal" aria-label="Менеджер отложенных задач">
+        <header>
+          <div class="language-title">
+            <span class="language-emblem">◷</span>
+            <div>
+              <span class="eyebrow">ФОНОВЫЙ ПЛАНИРОВЩИК</span>
+              <h2>Отложенные задачи</h2>
+            </div>
+          </div>
+          <button type="button" aria-label="Закрыть" @click="tasksOpen = false">×</button>
+        </header>
+
+        <div class="task-content">
+          <section v-if="scheduledTaskDraft" class="task-draft">
+            <span class="eyebrow">ПРЕДЛОЖЕНИЕ C-3PO</span>
+            <label>
+              <span>Название</span>
+              <input v-model="scheduledTaskDraft.title" maxlength="80" />
+            </label>
+            <label>
+              <span>Что выполнить</span>
+              <textarea v-model="scheduledTaskDraft.prompt" rows="3" maxlength="1000"></textarea>
+            </label>
+            <label>
+              <span>Когда</span>
+              <input type="datetime-local" :value="localDateTimeValue(scheduledTaskDraft.runAt)" @change="updateScheduledDraftTime" />
+            </label>
+            <small v-if="scheduledTaskDraft.kind === 'approval'">
+              Эта задача изменяет внешние данные. В назначенное время C-3PO попросит подтверждение.
+            </small>
+            <div class="task-draft-actions">
+              <button type="button" @click="scheduledTaskDraft = null">Отмена</button>
+              <button class="approve-button" type="button" @click="confirmScheduledTask">Создать задачу</button>
+            </div>
+          </section>
+
+          <div v-if="scheduledTasks.length" class="task-list">
+            <article v-for="task in scheduledTasks.slice().sort((a, b) => b.runAt.localeCompare(a.runAt))" :key="task.id" class="task-card">
+              <div class="task-card-head">
+                <span class="task-state" :class="task.status">{{ scheduledStatusLabel(task.status) }}</span>
+                <time>{{ formatScheduledDate(task.runAt) }}</time>
+              </div>
+              <strong>{{ task.title }}</strong>
+              <p>{{ task.prompt }}</p>
+              <div v-if="task.status === 'running'" class="task-progress"><i :style="{ width: `${task.progress}%` }"></i></div>
+              <small v-if="task.result" class="task-result">{{ task.result }}</small>
+              <div class="task-card-actions">
+                <button v-if="task.status === 'pending' || task.status === 'waiting' || task.status === 'failed'" type="button" @click="runScheduledTask(task, true)">
+                  {{ task.status === "waiting" ? "Подтвердить" : "Выполнить сейчас" }}
+                </button>
+                <button v-if="task.status === 'pending' || task.status === 'waiting' || task.status === 'failed'" type="button" @click="cancelScheduledTask(task)">Отменить</button>
+                <button type="button" @click="deleteScheduledTask(task)">Удалить</button>
+              </div>
+            </article>
+          </div>
+          <div v-else-if="!scheduledTaskDraft" class="task-empty">
+            <span>◷</span>
+            <strong>Отложенных задач пока нет</strong>
+            <p>Например: «Через 20 минут проанализируй почту» или «Напомни завтра в 9:00 проверить календарь».</p>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <div v-if="settingsOpen" class="modal-backdrop" @click.self="settingsOpen = false">
       <section class="permission-modal settings-modal" :aria-label="settingsLabels[interfaceLanguage].settings">
         <header>
@@ -3969,6 +4293,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="settings-links">
+            <button type="button" @click="settingsOpen = false; tasksOpen = true"><span>◷</span>Отложенные задачи<b>→</b></button>
             <button type="button" @click="settingsOpen = false; languageOpen = true"><span>文</span>{{ t("languageSettings") }}<b>→</b></button>
             <button type="button" @click="settingsOpen = false; openPermissions()"><span>⌾</span>{{ t("permissions") }}<b>→</b></button>
             <button type="button" @click="settingsOpen = false; openLlmPanel()"><span>◈</span>{{ llmShortLabel }}<b>→</b></button>

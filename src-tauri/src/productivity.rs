@@ -274,7 +274,7 @@ pub(crate) fn create_mail_draft(
     let subject = subject.trim();
     let body = body.trim();
     validate_draft(recipient, subject, body)?;
-    let undo_token = create_mail_draft_native(recipient, subject, body).map_err(|error| {
+    let undo_token = create_mail_draft_native(recipient, subject, body).inspect_err(|_error| {
         crate::executor::audit_action(
             "email-draft",
             "medium",
@@ -285,7 +285,6 @@ pub(crate) fn create_mail_draft(
                 "bodyCharacters": body.chars().count(),
             }),
         );
-        error
     })?;
     crate::executor::audit_action(
         "email-draft",
@@ -387,14 +386,13 @@ pub(crate) fn create_calendar_event(
     let end_at = end_at.trim();
     let notes = notes.trim();
     validate_calendar_event(title, start_at, end_at, notes)?;
-    let undo_token = create_calendar_event_native(title, start_at, end_at, notes).map_err(|error| {
+    let undo_token = create_calendar_event_native(title, start_at, end_at, notes).inspect_err(|_error| {
         crate::executor::audit_action(
             "calendar-event",
             "medium",
             "failed",
             serde_json::json!({ "titleCharacters": title.chars().count(), "hasNotes": !notes.is_empty() }),
         );
-        error
     })?;
     crate::executor::audit_action(
         "calendar-event",

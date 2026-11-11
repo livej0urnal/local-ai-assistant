@@ -863,14 +863,13 @@ pub(crate) fn open_application(application: String) -> Result<ActionResult, Stri
     {
         return Err("Укажите корректное название приложения".to_string());
     }
-    let opened_name = launch_named_application(&application).map_err(|error| {
+    let opened_name = launch_named_application(&application).inspect_err(|_error| {
         audit_action(
             "open-application",
             "low",
             "failed",
             serde_json::json!({ "application": application.clone() }),
         );
-        error
     })?;
     audit_action(
         "open-application",
@@ -903,7 +902,7 @@ pub(crate) fn get_automation_permissions() -> AutomationPermissions {
         // Обе функции только читают состояние TCC и не показывают системных окон.
         let accessibility = unsafe { AXIsProcessTrusted() };
         let screen_recording = unsafe { CGPreflightScreenCaptureAccess() };
-        return AutomationPermissions {
+        AutomationPermissions {
             platform: "macos".to_string(),
             accessibility,
             screen_recording,
@@ -913,7 +912,7 @@ pub(crate) fn get_automation_permissions() -> AutomationPermissions {
                 "Для клавиатуры и кнопок разрешите C-3PO в разделе «Универсальный доступ»."
                     .to_string()
             },
-        };
+        }
     }
     #[cfg(target_os = "windows")]
     {
@@ -1028,10 +1027,10 @@ pub(crate) fn open_automation_settings(kind: String) -> Result<ActionResult, Str
             .arg(url)
             .spawn()
             .map_err(|error| format!("Не удалось открыть системные настройки: {error}"))?;
-        return Ok(ActionResult {
+        Ok(ActionResult {
             success: true,
             message: "Открыт системный раздел разрешений.".to_string(),
-        });
+        })
     }
     #[cfg(target_os = "windows")]
     {
@@ -1125,14 +1124,14 @@ end run
                 "submitted": submit,
             }),
         );
-        return Ok(ActionResult {
+        Ok(ActionResult {
             success: true,
             message: if submit {
                 format!("Текст введён и подтверждён в «{application}».")
             } else {
                 format!("Текст введён в «{application}».")
             },
-        });
+        })
     }
     #[cfg(target_os = "windows")]
     {
@@ -1417,7 +1416,7 @@ pub(crate) fn send_telegram_message(
     message: String,
 ) -> Result<ActionResult, String> {
     let (contact, message) = validate_message(&contact, &message)?;
-    send_telegram(&contact, &message).map_err(|error| {
+    send_telegram(&contact, &message).inspect_err(|_error| {
         audit_action(
             "telegram-message",
             "high",
@@ -1427,7 +1426,6 @@ pub(crate) fn send_telegram_message(
                 "messageCharacters": message.chars().count(),
             }),
         );
-        error
     })?;
     audit_action(
         "telegram-message",

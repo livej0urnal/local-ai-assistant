@@ -196,6 +196,15 @@ function readUndoableAction(): UndoableAction | null {
   }
 }
 
+function readStringArray(key: string): string[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
 type WeatherReport = {
   source: string;
   summary: string;
@@ -642,6 +651,7 @@ const nextMessageId = ref(Math.max(1, ...messages.value.map((message) => message
 const input = ref("");
 const selectedFileContext = ref("");
 const selectedFileNames = ref<string[]>([]);
+const lastFileSearchResults = ref<string[]>(readStringArray("c3po.last-file-search-results"));
 const liveTranscript = ref("");
 const lastCommand = ref(initialProfile ? t("sayCommand") : introductionPrompt(commandLanguage.value));
 const pendingAction = ref<PendingAction | null>(null);
@@ -1237,7 +1247,9 @@ async function askLocalModel(
     await playR2D2Signal("error");
     await playPrivateVoice("error");
     const details = errorDetails(error);
-    const message = `Локальная модель не ответила: ${details.message}`;
+    const message = details.message.toLowerCase().includes("пуст")
+      ? "R2-D2 не сформировал ответ даже со второй попытки. Уточните задачу одним предложением — я повторю запрос."
+      : `Локальная модель временно недоступна: ${details.message}`;
     llmTestReply.value = message;
     if (showInConversation) addMessage("assistant", message);
     voiceState.value = "error";
@@ -2667,6 +2679,8 @@ async function answerFileSearch(query: string, notifyInBackground: boolean) {
   lastCommand.value = `Ищу «${query}» на этом компьютере…`;
   try {
     const report = await invoke<FileSearchReport>("search_files", { query, limit: 20 });
+    lastFileSearchResults.value = report.paths;
+    window.localStorage.setItem("c3po.last-file-search-results", JSON.stringify(report.paths));
     const response = report.paths.length
       ? [
           `Нашёл ${report.paths.length}${report.truncated ? "+" : ""} совпадений по имени «${report.query}»:`,
@@ -2695,6 +2709,28 @@ async function answerFileSearch(query: string, notifyInBackground: boolean) {
   }
 }
 
+function answerFileSearchFollowUp(text: string) {
+  if (!lastFileSearchResults.value.length
+    || !/(?:где\s+именно|который|какой).*(?:среди\s+них|из\s+них|в\s+списке)/iu.test(text)) {
+    return false;
+  }
+  const hint = text.match(/(?:проект|файл|папк\w*)\s+(?:с\s+)?([\p{L}\p{N}._-]+)/iu)?.[1]?.toLowerCase();
+  if (!hint) return false;
+  const matches = lastFileSearchResults.value
+    .filter((path) => path.toLowerCase().includes(hint))
+    .sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right));
+  if (!matches.length) return false;
+  const selected = matches[0];
+  const segments = selected.split("/");
+  const projectIndex = segments.findIndex((segment) => segment.toLowerCase().includes(hint));
+  const likelyRoot = projectIndex >= 0 ? segments.slice(0, projectIndex + 1).join("/") : selected;
+  const response = `Самый вероятный корень проекта: ${likelyRoot}`;
+  addMessage("assistant", response);
+  lastCommand.value = response;
+  speak(response);
+  return true;
+}
+
 function parseEmailDraftCommand(text: string) {
   const match = text.match(/^(?:напиши|подготовь|создай)\s+(?:черновик\s+)?письм[оа]\s+(?:на\s+адрес\s+|для\s+|на\s+)?([^\s,;]+@[^\s,;]+)\s+(?:с\s+темой|тема)\s+(.+?)\s+(?:текст|сообщение)\s+([\s\S]+)$/iu);
   if (!match) return null;
@@ -2705,6 +2741,17 @@ function parseEmailCompositionCommand(text: string) {
   const match = text.match(/^(?:напиши|подготовь|составь)\s+письм[оа]\s+(?:для\s+|на\s+)?([^\s,;]+@[^\s,;]+)\s+(?:с\s+темой|тема)\s+(.+?)\s+(?:о\s+том[,]?\s+что|содержание|по\s+поводу)\s+([\s\S]+)$/iu);
   if (!match) return null;
   return { recipient: match[1].trim(), subject: match[2].trim(), brief: match[3].trim() };
+}
+
+function incompleteEmailCommandHint(text: string) {
+  if (!/^(?:напиши|подготовь|составь)\s+(?:черновик\s+)?письм[оа]\b/iu.test(text.trim())) return "";
+  if (!/[\w.+-]+@[\w.-]+\.[\p{L}]{2,}/iu.test(text)) {
+    return "Не хватает адреса получателя. Например: «Составь письмо для user@example.com тема Встреча о том, что нужно перенести встречу».";
+  }
+  if (!/(?:с\s+темой|тема)\s+\S+/iu.test(text)) {
+    return "Не хватает темы письма. Добавьте после адреса: «тема …».";
+  }
+  return "Не хватает содержания письма. Допишите задачу после слов «о том, что».";
 }
 
 async function composeEmailWithLocalModel(recipient: string, subject: string, brief: string) {
@@ -2871,6 +2918,8 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
     return;
   }
 
+  if (answerFileSearchFollowUp(text)) return;
+
   if (pendingAction.value?.kind === "telegram-message" && /^(отправить сообщение|подтверждаю отправку)$/iu.test(normalized.trim())) {
     void approveAction();
     return;
@@ -2948,6 +2997,13 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   const emailComposition = parseEmailCompositionCommand(text);
   if (emailComposition) {
     void composeEmailWithLocalModel(emailComposition.recipient, emailComposition.subject, emailComposition.brief);
+    return;
+  }
+  const emailHint = incompleteEmailCommandHint(text);
+  if (emailHint) {
+    addMessage("assistant", emailHint);
+    lastCommand.value = emailHint;
+    speak(emailHint);
     return;
   }
   const calendarEvent = parseCalendarEventCommand(text);

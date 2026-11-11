@@ -1444,6 +1444,7 @@ button:disabled {
 
 .drawer-messages {
   padding: 12px 16px 20px;
+  overflow-x: hidden;
   overflow-y: auto;
   background-image: radial-gradient(rgba(185, 139, 54, 0.08) 0.7px, transparent 0.7px);
   background-size: 18px 18px;
@@ -1639,6 +1640,8 @@ button:disabled {
   background: var(--surface-raised);
   font-size: 12px;
   line-height: 1.48;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .drawer-message.user p {

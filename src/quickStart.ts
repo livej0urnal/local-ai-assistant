@@ -82,9 +82,9 @@ export const quickStartItems: readonly QuickStartItem[] = [
   {
     id: "file-analysis",
     icon: "▤",
-    label: "Проанализируй файл README.md",
-    description: "Локальное чтение и анализ через R2-D2",
-    action: { kind: "command", command: "Проанализируй файл README.md", expectedRoute: "file-analysis" },
+    label: "Проанализируй файл App.vue",
+    description: "Локальный разбор кода через BB-8",
+    action: { kind: "command", command: "Проанализируй файл App.vue", expectedRoute: "file-analysis" },
   },
   {
     id: "file-move",

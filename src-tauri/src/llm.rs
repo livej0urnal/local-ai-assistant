@@ -344,6 +344,12 @@ fn task_for_prompt(prompt: &str) -> &'static str {
         "typescript",
         "javascript",
         "python",
+        "vue",
+        "sql",
+        "html",
+        "css",
+        "swift",
+        "java",
         "функци",
         "ошибк",
         "bug",
@@ -701,24 +707,41 @@ pub(crate) fn generate_local_reply(
         .timeout_global(Some(Duration::from_secs(90)))
         .build()
         .new_agent();
-    let mut response = agent
-        .post(format!(
-            "http://{LLAMA_HOST}:{LLAMA_PORT}/v1/chat/completions"
-        ))
-        .send_json(request)
-        .map_err(|error| format!("Ошибка локального запроса: {error}"))?;
-    let payload: serde_json::Value = response
-        .body_mut()
-        .read_json()
-        .map_err(|error| format!("Не удалось прочитать ответ модели: {error}"))?;
-    let text = payload["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| "Модель вернула пустой ответ".to_string())?;
+    let mut text = None;
+    for attempt in 0..2 {
+        let mut attempt_request = request.clone();
+        if attempt > 0 {
+            attempt_request["temperature"] = serde_json::json!(0.2);
+            if let Some(messages) = attempt_request["messages"].as_array_mut() {
+                messages.push(serde_json::json!({
+                    "role": "system",
+                    "content": "The previous generation was empty. Return one complete, direct and useful answer now."
+                }));
+            }
+        }
+        let mut response = agent
+            .post(format!(
+                "http://{LLAMA_HOST}:{LLAMA_PORT}/v1/chat/completions"
+            ))
+            .send_json(attempt_request)
+            .map_err(|error| format!("Ошибка локального запроса: {error}"))?;
+        let payload: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .map_err(|error| format!("Не удалось прочитать ответ модели: {error}"))?;
+        text = payload["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if text.is_some() {
+            break;
+        }
+    }
+    let text = text.ok_or_else(|| "Модель дважды вернула пустой ответ".to_string())?;
 
     Ok(LocalReply {
-        text: text.to_string(),
+        text,
         model: selected_model.name,
         task: task.to_string(),
     })
@@ -771,6 +794,7 @@ mod tests {
     #[test]
     fn routes_common_tasks_without_sending_data_anywhere() {
         assert_eq!(task_for_prompt("Помоги исправить Rust код"), "code");
+        assert_eq!(task_for_prompt("Проанализируй файл App.vue"), "code");
         assert_eq!(task_for_prompt("Проанализируй входящие письма"), "mail");
         assert_eq!(task_for_prompt("Напиши короткую статью"), "writing");
         assert_eq!(task_for_prompt("Который час?"), "general");

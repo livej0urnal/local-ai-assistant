@@ -192,6 +192,11 @@ type RecognitionLike = {
 
 type RecognitionConstructor = new () => RecognitionLike;
 
+type MicrophoneOption = {
+  deviceId: string;
+  label: string;
+};
+
 const storedInterfaceLanguage = window.localStorage.getItem("c3po.interface-language");
 const storedCommandLanguage = window.localStorage.getItem("c3po.command-language");
 const interfaceLanguage = ref<LanguageCode>(isLanguageCode(storedInterfaceLanguage) ? storedInterfaceLanguage : "ru");
@@ -552,6 +557,8 @@ const onboardingOpen = ref(false);
 const voiceState = ref<VoiceState>("idle");
 const microphonePermission = ref<PermissionState>("checking");
 const microphoneDevices = ref(0);
+const microphoneOptions = ref<MicrophoneOption[]>([]);
+const selectedMicrophoneId = ref(window.localStorage.getItem("c3po.microphone-device") || "default");
 const microphoneActive = ref(false);
 const recognitionAvailable = ref(false);
 const synthesisAvailable = ref(false);
@@ -574,6 +581,7 @@ watch(isConsultingR2, (isActive) => {
 const lastError = ref<AppError | null>(null);
 const recentLogs = ref<string[]>([]);
 const logPath = ref("");
+const actionLogPath = ref("");
 const logsLoading = ref(false);
 const logsExpanded = ref(false);
 const processMetrics = ref<ProcessMetrics | null>(null);
@@ -734,6 +742,15 @@ const pendingActionButton = computed(() => {
   if (pendingAction.value?.kind === "telegram-message") return "Отправить";
   if (pendingAction.value?.kind === "application-text") return pendingAction.value.submit ? "Ввести и выполнить" : "Ввести";
   return "Разрешить";
+});
+const pendingActionRisk = computed(() => {
+  if (pendingAction.value?.kind === "telegram-message") return { code: "high", label: "ВЫСОКИЙ РИСК" };
+  if (pendingAction.value?.kind === "application-text") {
+    return pendingAction.value.submit
+      ? { code: "high", label: "ВЫСОКИЙ РИСК" }
+      : { code: "medium", label: "СРЕДНИЙ РИСК" };
+  }
+  return { code: "low", label: "НИЗКИЙ РИСК" };
 });
 
 function formatBytes(bytes: number) {
@@ -1179,7 +1196,13 @@ async function refreshLogs() {
 async function openPermissions() {
   permissionsOpen.value = true;
   logsExpanded.value = false;
-  await Promise.all([refreshLogs(), refreshAutomationPermissions()]);
+  await Promise.all([
+    refreshLogs(),
+    refreshAutomationPermissions(),
+    "__TAURI_INTERNALS__" in window
+      ? invoke<string>("get_action_log_path").then((path) => { actionLogPath.value = path; }).catch(() => undefined)
+      : Promise.resolve(),
+  ]);
 }
 
 async function refreshAutomationPermissions() {
@@ -1449,7 +1472,25 @@ function interruptAssistantSpeech(
 async function countMicrophones() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
   const devices = await navigator.mediaDevices.enumerateDevices();
-  microphoneDevices.value = devices.filter((device) => device.kind === "audioinput").length;
+  const inputs = devices.filter((device) => device.kind === "audioinput");
+  microphoneDevices.value = inputs.length;
+  microphoneOptions.value = inputs.map((device, index) => ({
+    deviceId: device.deviceId,
+    label: device.label || `Микрофон ${index + 1}`,
+  }));
+  if (selectedMicrophoneId.value !== "default"
+    && !microphoneOptions.value.some((device) => device.deviceId === selectedMicrophoneId.value)) {
+    selectedMicrophoneId.value = "default";
+    window.localStorage.setItem("c3po.microphone-device", "default");
+  }
+}
+
+async function selectMicrophone() {
+  window.localStorage.setItem("c3po.microphone-device", selectedMicrophoneId.value);
+  await writeLog("info", "microphone.device", "Выбрано устройство ввода", {
+    device: microphoneOptions.value.find((item) => item.deviceId === selectedMicrophoneId.value)?.label || "Системный микрофон",
+  });
+  if (microphoneActive.value) await requestMicrophone();
 }
 
 async function requestMicrophone() {
@@ -1478,6 +1519,7 @@ async function requestMicrophone() {
     microphoneStream?.getTracks().forEach((track) => track.stop());
     microphoneStream = await navigator.mediaDevices.getUserMedia({
       audio: {
+        deviceId: selectedMicrophoneId.value === "default" ? undefined : { exact: selectedMicrophoneId.value },
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
@@ -1878,6 +1920,13 @@ function proposeSystemInfo() {
 }
 
 function cancelAction() {
+  const action = pendingAction.value;
+  if (action && "__TAURI_INTERNALS__" in window) {
+    const risk = action.kind === "telegram-message" || (action.kind === "application-text" && action.submit)
+      ? "high"
+      : action.kind === "application-text" ? "medium" : "low";
+    void invoke("record_action_decision", { action: action.kind, risk, outcome: "cancelled" });
+  }
   pendingAction.value = null;
   awaitingTelegramMessageContact.value = "";
   const response = assistantPhrase("actionCancelled");
@@ -1890,6 +1939,13 @@ async function approveAction() {
   if (!action) return;
   isWorking.value = true;
   voiceState.value = "thinking";
+
+  if ("__TAURI_INTERNALS__" in window) {
+    const risk = action.kind === "telegram-message" || (action.kind === "application-text" && action.submit)
+      ? "high"
+      : action.kind === "application-text" ? "medium" : "low";
+    await invoke("record_action_decision", { action: action.kind, risk, outcome: "approved" }).catch(() => undefined);
+  }
 
   try {
     if (action.kind === "application-text") {
@@ -2463,10 +2519,12 @@ onMounted(async () => {
   // прервать своей речью. Само распознавание на время фразы приостанавливается
   // внутри playPrivateVoice, поэтому C-3PO не принимает свой голос за команду.
   await inspectMicrophonePermission();
+  navigator.mediaDevices?.addEventListener?.("devicechange", countMicrophones);
   await playPrivateVoice("startup", true, true);
 });
 
 onBeforeUnmount(() => {
+  navigator.mediaDevices?.removeEventListener?.("devicechange", countMicrophones);
   window.clearInterval(memoryTimer);
   pauseMicrophone();
   window.speechSynthesis?.cancel();
@@ -2617,7 +2675,7 @@ onBeforeUnmount(() => {
       <section v-if="pendingAction" class="approval-bar">
         <div class="approval-icon">⌘</div>
         <div>
-          <span class="eyebrow">НУЖНО ПОДТВЕРЖДЕНИЕ</span>
+          <span class="eyebrow">НУЖНО ПОДТВЕРЖДЕНИЕ · {{ pendingActionRisk.label }}</span>
           <h3>{{ pendingActionTitle }}</h3>
           <p>{{ pendingActionDescription }}</p>
         </div>
@@ -2794,6 +2852,20 @@ onBeforeUnmount(() => {
             </small>
           </section>
 
+          <section class="settings-section">
+            <span class="settings-section-title">Устройство ввода</span>
+            <label class="settings-select-field">
+              <span>Микрофон</span>
+              <select v-model="selectedMicrophoneId" @change="selectMicrophone">
+                <option value="default">Системный микрофон</option>
+                <option v-for="device in microphoneOptions" :key="device.deviceId" :value="device.deviceId">
+                  {{ device.label }}
+                </option>
+              </select>
+            </label>
+            <small class="settings-hint">Используется для уровня звука, прерывания речи и будущего локального распознавания.</small>
+          </section>
+
           <button class="settings-toggle" type="button" :class="{ active: silentMode }" @click="toggleSilentMode">
             <span class="settings-row-icon">{{ silentMode ? "×" : "♫" }}</span>
             <span><strong>{{ silentModeLabels[interfaceLanguage].title }}</strong><small>{{ silentModeLabels[interfaceLanguage].description }}</small></span>
@@ -2963,6 +3035,7 @@ onBeforeUnmount(() => {
             <pre v-if="recentLogs.length">{{ recentLogs.join("\n") }}</pre>
             <p v-else>Записей пока нет.</p>
             <small v-if="logPath" class="log-path">Файл: {{ logPath }}</small>
+            <small v-if="actionLogPath" class="log-path">Действия: {{ actionLogPath }}</small>
           </template>
         </section>
 

@@ -1,9 +1,67 @@
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static ACTION_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn action_log_path() -> Result<PathBuf, String> {
+    let project_dirs = directories::ProjectDirs::from("com", "igorfilippov", "C-3PO")
+        .ok_or_else(|| "Не удалось определить папку журнала действий".to_string())?;
+    let directory = project_dirs.data_local_dir().join("logs");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("actions.jsonl"))
+}
+
+fn audit_action(action: &str, risk: &str, outcome: &str, metadata: serde_json::Value) {
+    let Ok(_guard) = ACTION_LOG_LOCK.get_or_init(|| Mutex::new(())).lock() else {
+        return;
+    };
+    let record = serde_json::json!({
+        "timestampUnixMs": SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_millis()).unwrap_or_default(),
+        "action": action,
+        "risk": risk,
+        "outcome": outcome,
+        "metadata": metadata,
+    });
+    let Ok(path) = action_log_path() else {
+        return;
+    };
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{record}");
+}
+
+#[tauri::command]
+pub(crate) fn get_action_log_path() -> Result<String, String> {
+    Ok(action_log_path()?.display().to_string())
+}
+
+#[tauri::command]
+pub(crate) fn record_action_decision(
+    action: String,
+    risk: String,
+    outcome: String,
+) -> Result<(), String> {
+    validate_action_decision(&action, &risk, &outcome)?;
+    audit_action(&action, &risk, &outcome, serde_json::json!({}));
+    Ok(())
+}
+
+fn validate_action_decision(action: &str, risk: &str, outcome: &str) -> Result<(), String> {
+    const ACTIONS: [&str; 3] = ["system-info", "telegram-message", "application-text"];
+    const RISKS: [&str; 3] = ["low", "medium", "high"];
+    const OUTCOMES: [&str; 2] = ["approved", "cancelled"];
+    if !ACTIONS.contains(&action) || !RISKS.contains(&risk) || !OUTCOMES.contains(&outcome) {
+        return Err("Некорректная запись журнала действий".to_string());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -321,7 +379,21 @@ pub(crate) fn open_application(application: String) -> Result<ActionResult, Stri
     {
         return Err("Укажите корректное название приложения".to_string());
     }
-    let opened_name = launch_named_application(&application)?;
+    let opened_name = launch_named_application(&application).map_err(|error| {
+        audit_action(
+            "open-application",
+            "low",
+            "failed",
+            serde_json::json!({ "application": application.clone() }),
+        );
+        error
+    })?;
+    audit_action(
+        "open-application",
+        "low",
+        "completed",
+        serde_json::json!({ "application": opened_name.clone() }),
+    );
     Ok(ActionResult {
         success: true,
         message: format!("Приложение «{opened_name}» открыто."),
@@ -472,8 +544,28 @@ end run
             .output()
             .map_err(|error| format!("Не удалось выполнить ввод: {error}"))?;
         if !output.status.success() {
+            audit_action(
+                "application-text",
+                if submit { "high" } else { "medium" },
+                "failed",
+                serde_json::json!({
+                    "application": application.clone(),
+                    "characters": text.chars().count(),
+                    "submitted": submit,
+                }),
+            );
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
+        audit_action(
+            "application-text",
+            if submit { "high" } else { "medium" },
+            "completed",
+            serde_json::json!({
+                "application": application.clone(),
+                "characters": text.chars().count(),
+                "submitted": submit,
+            }),
+        );
         return Ok(ActionResult {
             success: true,
             message: if submit {
@@ -538,8 +630,26 @@ pub(crate) fn search_in_browser(browser: String, query: String) -> Result<Action
         Err(std::io::Error::other("unsupported platform"));
     let output = result.map_err(|error| format!("Не удалось открыть поиск: {error}"))?;
     if !output.status.success() {
+        audit_action(
+            "browser-search",
+            "low",
+            "failed",
+            serde_json::json!({
+                "browser": canonical_application_name(browser),
+                "queryCharacters": query.chars().count(),
+            }),
+        );
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+    audit_action(
+        "browser-search",
+        "low",
+        "completed",
+        serde_json::json!({
+            "browser": canonical_application_name(browser),
+            "queryCharacters": query.chars().count(),
+        }),
+    );
     Ok(ActionResult {
         success: true,
         message: format!("Поиск «{query}» открыт в браузере."),
@@ -715,7 +825,27 @@ pub(crate) fn send_telegram_message(
     message: String,
 ) -> Result<ActionResult, String> {
     let (contact, message) = validate_message(&contact, &message)?;
-    send_telegram(&contact, &message)?;
+    send_telegram(&contact, &message).map_err(|error| {
+        audit_action(
+            "telegram-message",
+            "high",
+            "failed",
+            serde_json::json!({
+                "contactCharacters": contact.chars().count(),
+                "messageCharacters": message.chars().count(),
+            }),
+        );
+        error
+    })?;
+    audit_action(
+        "telegram-message",
+        "high",
+        "completed",
+        serde_json::json!({
+            "contactCharacters": contact.chars().count(),
+            "messageCharacters": message.chars().count(),
+        }),
+    );
     Ok(ActionResult {
         success: true,
         message: format!("Сообщение контакту «{contact}» отправлено через Telegram."),
@@ -787,5 +917,13 @@ mod tests {
         assert!(validate_automation_text("Notes", "Купить молоко").is_ok());
         assert!(validate_automation_text("", "Текст").is_err());
         assert!(validate_automation_text("Notes", "строка\nс переносом").is_err());
+    }
+
+    #[test]
+    fn rejects_forged_action_journal_values() {
+        assert!(validate_action_decision("system-info", "low", "approved").is_ok());
+        assert!(validate_action_decision("shell", "low", "approved").is_err());
+        assert!(validate_action_decision("system-info", "unknown", "approved").is_err());
+        assert!(validate_action_decision("system-info", "low", "rewritten").is_err());
     }
 }

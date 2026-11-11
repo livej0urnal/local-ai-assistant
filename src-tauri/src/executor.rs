@@ -304,7 +304,7 @@ pub(crate) async fn search_files(
         .map_err(|error| format!("Локальный поиск неожиданно остановился: {error}"))?
 }
 
-fn resolve_file_reference_native(
+pub(crate) fn resolve_file_reference_native(
     reference: String,
     directory_only: bool,
 ) -> Result<String, String> {

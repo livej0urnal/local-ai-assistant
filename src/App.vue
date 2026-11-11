@@ -225,6 +225,16 @@ type FileContentReport = {
   truncated: boolean;
 };
 
+type ProjectContextReport = {
+  root: string;
+  projectType: string;
+  filesScanned: number;
+  selectedFiles: Array<{ path: string; language: string; excerpt: string; truncated: boolean }>;
+  gitBranch: string | null;
+  gitDirty: boolean;
+  context: string;
+};
+
 type MailOverview = {
   source: string;
   unread: number;
@@ -2566,6 +2576,15 @@ function parseFileRenameCommand(text: string): { source: string; newName: string
     : null;
 }
 
+function parseProjectAnalysisCommand(text: string): { reference: string; question: string } | null {
+  const match = text.match(/^(?:проанализируй|разбери|изучи|проверь|analyze)\s+проект\s+(.+?)(?:\s+и\s+(.+))?$/iu);
+  if (!match) return null;
+  return {
+    reference: cleanPathReference(match[1]),
+    question: match[2]?.trim() || "Определи назначение проекта, его архитектуру, ключевые модули, риски и следующие практические шаги.",
+  };
+}
+
 async function resolveFileReference(reference: string, directoryOnly = false) {
   return invoke<string>("resolve_file_reference", { reference, directoryOnly });
 }
@@ -2657,6 +2676,46 @@ async function renameLocalFile(request: { source: string; newName: string }, not
   } finally {
     isWorking.value = false;
     voiceState.value = microphoneActive.value ? "listening" : "idle";
+  }
+}
+
+async function analyzeLocalProject(request: { reference: string; question: string }, notifyInBackground: boolean) {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  isWorking.value = true;
+  voiceState.value = "thinking";
+  lastCommand.value = `Строю локальный индекс проекта «${request.reference}»…`;
+  try {
+    const report = await invoke<ProjectContextReport>("build_project_context", {
+      reference: request.reference,
+      question: request.question,
+    });
+    await writeLog("info", "agent.project-context", "Подготовлен локальный контекст проекта", {
+      projectType: report.projectType,
+      filesScanned: report.filesScanned,
+      filesSelected: report.selectedFiles.length,
+      gitDirty: report.gitDirty,
+    });
+    isWorking.value = false;
+    const prompt = [
+      `Запрос пользователя: ${request.question}`,
+      "Отвечай как инженер: ссылайся на реальные относительные пути из контекста, отделяй факты от предположений и не утверждай, что менял файлы.",
+    ].join(" ");
+    const reply = await askLocalModel(prompt, true, report.context);
+    if (notifyInBackground && reply) void notifyFromBackground(reply);
+    if (!reply) {
+      const fallback = `Проект найден: ${report.root}. Тип: ${report.projectType}. Просканировано файлов: ${report.filesScanned}. Ветка Git: ${report.gitBranch || "не определена"}.`;
+      addMessage("assistant", fallback);
+      lastCommand.value = fallback;
+    }
+  } catch (error) {
+    const response = `Не удалось проанализировать проект: ${errorDetails(error).message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    await writeLog("error", "agent.project-context", response);
+  } finally {
+    isWorking.value = false;
+    if (voiceState.value === "thinking") voiceState.value = microphoneActive.value ? "listening" : "idle";
   }
 }
 
@@ -2966,6 +3025,11 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   }
   if (pendingAction.value && /(отмен|нет|стоп)/.test(normalized)) {
     cancelAction();
+    return;
+  }
+  const projectAnalysis = parseProjectAnalysisCommand(text);
+  if (projectAnalysis) {
+    void analyzeLocalProject(projectAnalysis, notifyInBackground);
     return;
   }
   const fileRename = parseFileRenameCommand(text);

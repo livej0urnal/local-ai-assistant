@@ -1,6 +1,7 @@
 mod executor;
 mod llm;
 mod productivity;
+mod project;
 mod tts;
 
 use directories::ProjectDirs;
@@ -451,6 +452,7 @@ pub fn run() {
             llm::start_llm,
             llm::stop_llm,
             llm::generate_local_reply,
+            project::build_project_context,
             productivity::get_mail_overview,
             productivity::get_calendar_overview,
             productivity::prime_productivity_permissions,

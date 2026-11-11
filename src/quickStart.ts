@@ -5,6 +5,7 @@ export type QuickStartRoute =
   | "application-open"
   | "file-search"
   | "file-analysis"
+  | "project-analysis"
   | "mail-analysis"
   | "calendar-analysis";
 
@@ -85,6 +86,17 @@ export const quickStartItems: readonly QuickStartItem[] = [
     label: "Проанализируй файл App.vue",
     description: "Локальный разбор кода через BB-8",
     action: { kind: "command", command: "Проанализируй файл App.vue", expectedRoute: "file-analysis" },
+  },
+  {
+    id: "project-analysis",
+    icon: "⌘",
+    label: "Проанализируй проект local-ai-assistant",
+    description: "Индекс кода, Git-состояние и ключевые файлы",
+    action: {
+      kind: "command",
+      command: "Проанализируй проект local-ai-assistant",
+      expectedRoute: "project-analysis",
+    },
   },
   {
     id: "file-move",
@@ -174,6 +186,7 @@ export function classifyQuickStartCommand(command: string): QuickStartRoute | nu
   }
   if (/^(?:найди|найти|поищи|отыщи|find|search\s+for)(?:\s|$)/u.test(normalized)) return "file-search";
   if (/^(?:проанализируй|разбери|изучи|analyze|summarize)(?:\s)+(?:файл|документ|file|document)(?:\s|$)/u.test(normalized)) return "file-analysis";
+  if (/^(?:проанализируй|разбери|изучи|проверь|analyze)(?:\s)+проект(?:\s|$)/u.test(normalized)) return "project-analysis";
   if (/(проанализ|разбер|сортир|приоритет|важн|непрочитан).*(почт|письм|email|inbox)/u.test(normalized)) {
     return "mail-analysis";
   }

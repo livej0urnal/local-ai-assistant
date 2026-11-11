@@ -26,3 +26,9 @@ for (const item of quickStartItems) {
     assert.ok(["system-info", "chat", "models", "permissions", "voice-test"].includes(item.action.kind));
   });
 }
+
+test("поиск в интернете не превращается в поиск локального файла", () => {
+  assert.equal(classifyQuickStartCommand("Найди в интернете документацию Tauri"), "browser-search");
+  assert.equal(classifyQuickStartCommand("Найди в интернете последнюю погоду"), "weather");
+  assert.equal(classifyQuickStartCommand("Найди файл отчет.pdf"), "file-search");
+});

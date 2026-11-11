@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -83,6 +84,13 @@ pub(crate) struct AutomationPermissions {
     accessibility: bool,
     screen_recording: bool,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ScreenCapture {
+    data_url: String,
+    captured_at_unix_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -928,6 +936,81 @@ pub(crate) fn get_automation_permissions() -> AutomationPermissions {
     }
 }
 
+fn screen_capture_path() -> Result<PathBuf, String> {
+    let directory = directories::ProjectDirs::from("com", "igorfilippov", "C-3PO")
+        .ok_or_else(|| "Не удалось определить папку снимков экрана".to_string())?
+        .cache_dir()
+        .join("screen-analysis");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory.join("latest-screen.png"))
+}
+
+#[tauri::command]
+pub(crate) fn capture_screen() -> Result<ScreenCapture, String> {
+    let path = screen_capture_path()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        if !unsafe { CGPreflightScreenCaptureAccess() } {
+            return Err("C-3PO не получил разрешение «Запись экрана». Откройте «Доступы» и разрешите его в системных настройках macOS.".to_string());
+        }
+        let output = Command::new("/usr/sbin/screencapture")
+            .args(["-x", "-t", "png"])
+            .arg(&path)
+            .output()
+            .map_err(|error| format!("Не удалось сделать снимок экрана: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "macOS не разрешила снимок экрана: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        // Ограничиваем изображение 1280 пикселями по длинной стороне: текст
+        // остаётся читаемым, а визуальная модель отвечает заметно быстрее.
+        let _ = Command::new("/usr/bin/sips")
+            .args(["-Z", "1280"])
+            .arg(&path)
+            .output();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $bounds=[System.Windows.Forms.SystemInformation]::VirtualScreen; $scale=[Math]::Min(1.0,1280.0/$bounds.Width); $w=[Math]::Max(1,[int]($bounds.Width*$scale)); $h=[Math]::Max(1,[int]($bounds.Height*$scale)); $source=New-Object System.Drawing.Bitmap $bounds.Width,$bounds.Height; $graphics=[System.Drawing.Graphics]::FromImage($source); $graphics.CopyFromScreen($bounds.Left,$bounds.Top,0,0,$bounds.Size); $target=New-Object System.Drawing.Bitmap $w,$h; $draw=[System.Drawing.Graphics]::FromImage($target); $draw.DrawImage($source,0,0,$w,$h); $target.Save($env:C3PO_SCREENSHOT_PATH,[System.Drawing.Imaging.ImageFormat]::Png); $draw.Dispose(); $graphics.Dispose(); $target.Dispose(); $source.Dispose();"#;
+        let output = Command::new("powershell.exe")
+            .env("C3PO_SCREENSHOT_PATH", &path)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .map_err(|error| format!("Не удалось сделать снимок экрана: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Windows не создала снимок экрана: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return Err("Анализ экрана пока поддерживается только на macOS и Windows".to_string());
+
+    let bytes = fs::read(&path).map_err(|error| format!("Не удалось прочитать снимок: {error}"))?;
+    if bytes.is_empty() || bytes.len() > 15_000_000 {
+        return Err("Снимок экрана пустой или слишком большой для локального анализа".to_string());
+    }
+    audit_action(
+        "screen-capture",
+        "medium",
+        "completed",
+        serde_json::json!({ "bytes": bytes.len() }),
+    );
+    Ok(ScreenCapture {
+        data_url: format!("data:image/png;base64,{}", BASE64_STANDARD.encode(bytes)),
+        captured_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or_default(),
+    })
+}
+
 #[tauri::command]
 pub(crate) fn open_automation_settings(kind: String) -> Result<ActionResult, String> {
     #[cfg(target_os = "macos")]
@@ -1129,6 +1212,39 @@ pub(crate) fn search_in_browser(browser: String, query: String) -> Result<Action
     Ok(ActionResult {
         success: true,
         message: format!("Поиск «{query}» открыт в браузере."),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn search_web(query: String) -> Result<ActionResult, String> {
+    let query = query.trim();
+    if query.is_empty() || query.chars().count() > 500 || query.chars().any(char::is_control) {
+        return Err("Укажите корректный интернет-запрос".to_string());
+    }
+    let url = format!(
+        "https://www.google.com/search?q={}",
+        percent_encode_query(query)
+    );
+    #[cfg(target_os = "macos")]
+    let result = Command::new("/usr/bin/open").arg(&url).output();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer.exe").arg(&url).output();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result: std::io::Result<std::process::Output> =
+        Err(std::io::Error::other("unsupported platform"));
+    let output = result.map_err(|error| format!("Не удалось открыть интернет-поиск: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    audit_action(
+        "web-search",
+        "low",
+        "completed",
+        serde_json::json!({ "queryCharacters": query.chars().count() }),
+    );
+    Ok(ActionResult {
+        success: true,
+        message: format!("Поиск «{query}» открыт в браузере по умолчанию."),
     })
 }
 

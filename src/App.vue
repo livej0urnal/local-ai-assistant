@@ -2562,8 +2562,30 @@ async function answerWeatherQuestion(question: string, notifyInBackground: boole
 }
 
 function parseFileSearchCommand(text: string): string | null {
+  if (/(?:в\s+интернете|онлайн|в\s+сети|internet|online|web)/iu.test(text)) return null;
   const match = text.match(/^(?:найди|найти|поищи|отыщи|где\s+(?:находится|лежит)|find|search\s+for)\s+(?:(?:файл|файлы|папку|папка|документ|document|file|folder)\s*)?(.*)$/iu);
   return match ? match[1].trim().replace(/^[«"']|[»"']$/gu, "") : null;
+}
+
+function parseInternetSearchCommand(text: string): string | null {
+  const match = text.match(/^(?:найди|найти|поищи|поищите|search(?:\s+for)?)\s+(?:в\s+интернете|онлайн|в\s+сети|on\s+the\s+web)\s+(?:информацию\s+)?(?:о\s+|об\s+)?(.+)$/iu);
+  return match?.[1]?.trim() || null;
+}
+
+async function answerInternetSearch(query: string, notifyInBackground: boolean) {
+  try {
+    if (!("__TAURI_INTERNALS__" in window)) throw new Error("Интернет-поиск доступен в настольной версии C-3PO");
+    const result = await invoke<NativeActionResult>("search_web", { query });
+    addMessage("assistant", result.message);
+    lastCommand.value = result.message;
+    speak(result.message);
+    if (notifyInBackground) void notifyFromBackground(result.message);
+  } catch (error) {
+    const response = `Не удалось открыть интернет-поиск: ${errorDetails(error).message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+  }
 }
 
 function cleanPathReference(value: string) {
@@ -3141,11 +3163,6 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
     void readOrAnalyzeFile(text, fileRead, notifyInBackground);
     return;
   }
-  const fileSearchQuery = parseFileSearchCommand(text);
-  if (fileSearchQuery !== null) {
-    void answerFileSearch(fileSearchQuery, notifyInBackground);
-    return;
-  }
   const emailDraft = parseEmailDraftCommand(text);
   if (emailDraft) {
     pendingAction.value = { kind: "email-draft", ...emailDraft };
@@ -3196,6 +3213,16 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
   }
   if (/(погод|weather|tiempo|wetter|m[ée]t[ée]o|tempo|天气|天気|طقس)/iu.test(normalized)) {
     void answerWeatherQuestion(text, notifyInBackground);
+    return;
+  }
+  const internetSearchQuery = parseInternetSearchCommand(text);
+  if (internetSearchQuery) {
+    void answerInternetSearch(internetSearchQuery, notifyInBackground);
+    return;
+  }
+  const fileSearchQuery = parseFileSearchCommand(text);
+  if (fileSearchQuery !== null) {
+    void answerFileSearch(fileSearchQuery, notifyInBackground);
     return;
   }
   if (/(проанализ|разбер|сортир|приоритет|важн|непрочитан|что\s+в).*(почт|письм|email|inbox)|(почт|письм|email|inbox).*(проанализ|разбер|сортир|приоритет|важн|непрочитан)/iu.test(normalized)) {

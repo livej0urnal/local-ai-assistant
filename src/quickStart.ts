@@ -194,6 +194,10 @@ export function classifyQuickStartCommand(command: string): QuickStartRoute | nu
   if (/^(?:открой|запусти|open|launch)(?:\s|$)/u.test(normalized) && /(?:^|\s)(?:найди|поищи|search)(?:\s|$)/u.test(normalized)) {
     return "browser-search";
   }
+  if (/^(?:найди|найти|поищи|search(?:\s+for)?)(?:\s|$)/u.test(normalized)
+    && /(?:в\s+интернете|онлайн|в\s+сети|on\s+the\s+web)/u.test(normalized)) {
+    return "browser-search";
+  }
   if (/^(?:найди|найти|поищи|отыщи|find|search\s+for)(?:\s|$)/u.test(normalized)) return "file-search";
   if (/^(?:проанализируй|разбери|изучи|analyze|summarize)(?:\s)+(?:файл|документ|file|document)(?:\s|$)/u.test(normalized)) return "file-analysis";
   if (/^(?:проанализируй|разбери|изучи|проверь|analyze)(?:\s)+проект(?:\s|$)/u.test(normalized)) return "project-analysis";

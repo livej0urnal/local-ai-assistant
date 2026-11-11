@@ -11,7 +11,8 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{System, get_current_pid};
 use tauri::{
@@ -73,6 +74,87 @@ struct ClientLogEntry {
 
 static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn is_c3po_managed_process(
+    current_executable_name: &str,
+    process_name: &str,
+    command: &[String],
+) -> bool {
+    if process_name.eq_ignore_ascii_case(current_executable_name) {
+        return true;
+    }
+
+    let normalized_name = process_name.to_ascii_lowercase();
+    let normalized_command = command
+        .iter()
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    let c3po_llama = normalized_name.contains("llama-server")
+        && normalized_command
+            .windows(2)
+            .any(|parts| parts[0] == "--port" && parts[1] == "11436");
+    let c3po_tts = normalized_command.iter().any(|part| {
+        part.ends_with("local_tts_server.py") && (part.contains("c-3po") || part.contains("c3po"))
+    });
+
+    c3po_llama || c3po_tts
+}
+
+fn terminate_previous_c3po_processes() {
+    let Ok(current_pid) = get_current_pid() else {
+        return;
+    };
+    let current_executable_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "local-ai-assistant".to_string());
+    let Ok(system) = System::new_all() else {
+        return;
+    };
+    let mut terminated_any = false;
+
+    for (pid, process) in system.processes() {
+        if *pid == current_pid {
+            continue;
+        }
+        let process_name = process.name().to_string_lossy();
+        let command = process
+            .cmd()
+            .iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if !is_c3po_managed_process(&current_executable_name, &process_name, &command) {
+            continue;
+        }
+
+        let stopped = process.kill();
+        append_native_log(
+            if stopped { "info" } else { "warn" },
+            "rust.process-takeover",
+            &format!(
+                "{} предыдущий процесс C-3PO: {} (PID {})",
+                if stopped {
+                    "Завершён"
+                } else {
+                    "Не удалось завершить"
+                },
+                process_name,
+                pid.as_u32()
+            ),
+        );
+        terminated_any |= stopped;
+    }
+
+    if terminated_any {
+        // Даём macOS/Windows освободить single-instance lock и локальные порты
+        // до инициализации нового экземпляра приложения.
+        thread::sleep(Duration::from_millis(650));
+    }
+}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -364,6 +446,7 @@ pub fn run() {
 
     info!("Starting C-3PO");
     append_native_log("info", "rust.application", "Starting C-3PO");
+    terminate_previous_c3po_processes();
 
     tauri::Builder::default()
         // Этот плагин намеренно регистрируется первым: повторный запуск не
@@ -532,5 +615,34 @@ mod tests {
 
         assert!(metrics.pid > 0);
         assert!(metrics.resident_memory_bytes > 0);
+    }
+
+    #[test]
+    fn startup_takeover_only_targets_c3po_processes() {
+        assert!(is_c3po_managed_process(
+            "local-ai-assistant",
+            "local-ai-assistant",
+            &[],
+        ));
+        assert!(is_c3po_managed_process(
+            "local-ai-assistant",
+            "llama-server",
+            &["llama-server".into(), "--port".into(), "11436".into()],
+        ));
+        assert!(is_c3po_managed_process(
+            "local-ai-assistant",
+            "python3",
+            &["/Library/Application Support/C-3PO/tts/local_tts_server.py".into()],
+        ));
+        assert!(!is_c3po_managed_process(
+            "local-ai-assistant",
+            "llama-server",
+            &["llama-server".into(), "--port".into(), "8080".into()],
+        ));
+        assert!(!is_c3po_managed_process(
+            "local-ai-assistant",
+            "python3",
+            &["/Users/example/project/local_tts_server.py".into()],
+        ));
     }
 }

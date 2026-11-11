@@ -454,6 +454,7 @@ pub fn run() {
             llm::start_llm,
             llm::stop_llm,
             llm::generate_local_reply,
+            llm::generate_visual_reply,
             llm::generate_code_patch,
             project::build_project_context,
             project::apply_code_patch,

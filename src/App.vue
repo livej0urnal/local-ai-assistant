@@ -50,12 +50,12 @@ type LocalModelFile = {
   path: string;
   sizeBytes: number;
   validGguf: boolean;
-  role: "general" | "code" | "writing-mail";
+  role: "general" | "code" | "writing-mail" | "vision";
 };
 
 type DroidModelProfile = {
   role: LocalModelFile["role"];
-  droid: "R2-D2" | "BB-8" | "K-2SO";
+  droid: "R2-D2" | "BB-8" | "K-2SO" | "BD-1";
   purpose: string;
   recommendedModel: string;
   model: LocalModelFile | null;
@@ -168,6 +168,11 @@ type AutomationPermissions = {
   accessibility: boolean;
   screenRecording: boolean;
   message: string;
+};
+
+type ScreenCapture = {
+  dataUrl: string;
+  capturedAtUnixMs: number;
 };
 
 type ProductivityPermissionReport = {
@@ -850,6 +855,7 @@ const droidModelDefinitions: Array<Omit<DroidModelProfile, "model">> = [
   { role: "general", droid: "R2-D2", purpose: "Общие вопросы и быстрые команды", recommendedModel: "Qwen2.5 1.5B" },
   { role: "code", droid: "BB-8", purpose: "Программирование и разбор ошибок", recommendedModel: "Qwen2.5 Coder 3B" },
   { role: "writing-mail", droid: "K-2SO", purpose: "Тексты, документы и анализ почты", recommendedModel: "Qwen3 4B" },
+  { role: "vision", droid: "BD-1", purpose: "Локальный анализ экрана и окон", recommendedModel: "Qwen2.5 VL 3B" },
 ];
 const droidModelFleet = computed<DroidModelProfile[]>(() => {
   const installed = llmStatus.value?.models ?? (llmStatus.value?.selectedModel ? [llmStatus.value.selectedModel] : []);
@@ -1104,7 +1110,7 @@ async function loadLlmStatus() {
 async function installRecommendedModels() {
   if (!("__TAURI_INTERNALS__" in window) || llmLoading.value) return;
   llmLoading.value = true;
-  modelInstallMessage.value = "Скачиваю три модели (около 5,7 ГБ). Не закрывайте C-3PO…";
+  modelInstallMessage.value = "Скачиваю четыре модели и визуальный проектор (около 8,5 ГБ). Не закрывайте C-3PO…";
   try {
     const report = await invoke<ModelInstallReport>("install_recommended_models");
     modelInstallMessage.value = report.installed.length
@@ -1294,6 +1300,55 @@ async function askLocalModel(
     isWorking.value = false;
     // Если синтез речи недоступен или включён тихий режим, speak() не меняет
     // состояние. Не оставляем экран навечно в режиме «думаю».
+    if (voiceState.value === "thinking") {
+      voiceState.value = microphoneActive.value ? "listening" : "idle";
+    }
+  }
+}
+
+function isScreenAnalysisCommand(text: string) {
+  return /(?:(?:что|кто).*(?:на\s+экране|на\s+рабочем\s+столе)|(?:посмотри|проанализируй|разбери|опиши|покажи|видишь).*(?:экран|рабочий\s+стол|текущее\s+окно)|(?:экран|рабочий\s+стол|текущее\s+окно).*(?:проанализируй|опиши|видишь)|what.*(?:screen|desktop)|analy[sz]e.*(?:screen|desktop))/iu.test(text);
+}
+
+async function analyzeCurrentScreen(question: string, notifyInBackground: boolean) {
+  isWorking.value = true;
+  isConsultingR2.value = true;
+  voiceState.value = "thinking";
+  lastCommand.value = "BD-1 получает защищённый снимок текущего экрана…";
+  try {
+    await nextTick();
+    await playR2D2Signal("thinking");
+    if (!llmRuntime.value?.ready && !(await startLocalModel())) {
+      throw new Error("Локальный сервер моделей не запустился");
+    }
+    const capture = await invoke<ScreenCapture>("capture_screen");
+    const reply = await invoke<LocalReply>("generate_visual_reply", {
+      prompt: question,
+      language: selectedCommandLanguage.value.modelName,
+      imageDataUrl: capture.dataUrl,
+    });
+    addMessage("assistant", reply.text);
+    lastCommand.value = reply.text;
+    await playR2D2Signal("success");
+    speak(reply.text);
+    if (notifyInBackground) void notifyFromBackground(reply.text);
+    await writeLog("info", "tool.screen-analysis", "Экран локально проанализирован", {
+      model: reply.model,
+      capturedAtUnixMs: capture.capturedAtUnixMs,
+    });
+  } catch (error) {
+    await playR2D2Signal("error");
+    await refreshAutomationPermissions();
+    const details = errorDetails(error);
+    const response = `Не удалось проанализировать экран: ${details.message}`;
+    addMessage("assistant", response);
+    lastCommand.value = response;
+    speak(response);
+    if (notifyInBackground) void notifyFromBackground(response);
+    await writeLog("error", "tool.screen-analysis", `${details.name}: ${details.message}`);
+  } finally {
+    isConsultingR2.value = false;
+    isWorking.value = false;
     if (voiceState.value === "thinking") {
       voiceState.value = microphoneActive.value ? "listening" : "idle";
     }
@@ -3132,6 +3187,10 @@ function processVoiceCommand(text: string, notifyInBackground = false, toolConte
     cancelAction();
     return;
   }
+  if (isScreenAnalysisCommand(text)) {
+    void analyzeCurrentScreen(text, notifyInBackground);
+    return;
+  }
   const projectEdit = parseProjectEditCommand(text);
   if (projectEdit) {
     if (/^\[?опишите\s+точное\s+изменение\]?$/iu.test(projectEdit.instruction)) {
@@ -4156,12 +4215,12 @@ onBeforeUnmount(() => {
         <div class="model-actions">
           <button type="button" :disabled="llmLoading" @click="loadLlmStatus">Обновить</button>
           <button
-            v-if="(llmStatus?.models?.filter((model) => model.validGguf).length || 0) < 3"
+            v-if="(llmStatus?.models?.filter((model) => model.validGguf).length || 0) < 4"
             class="model-primary-action"
             type="button"
             :disabled="llmLoading"
             @click="installRecommendedModels"
-          >{{ llmLoading ? "Устанавливаю…" : "Установить 3 модели · ~5,7 ГБ" }}</button>
+          >{{ llmLoading ? "Устанавливаю…" : "Установить 4 модели · ~8,5 ГБ" }}</button>
           <button v-if="llmRuntime?.ready" type="button" :disabled="llmLoading" @click="stopLocalModel">
             Остановить
           </button>
